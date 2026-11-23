@@ -1541,11 +1541,27 @@ class AppuntiWindow(Adw.ApplicationWindow):
         cache_root = work_dir / "mineru_cache" / f"{m['materia']}_cap{m['capitolo']}"
         if not cache_root.exists():
             return None
-        # Cerca il parametro src: nel #img-flag corrispondente
-        scan_files = list(parts_dir.glob("p*.typ")) if parts_dir.exists() else []
+
+        # Estrai il part_id esatto dall'ID figura (es. ecm-c11-p2-06 -> "2")
+        pid_m = re.match(r"^[^-]+-c\d+-p([^-]+)-\d+$", fig_id, re.IGNORECASE)
+        target_pid = pid_m.group(1).lower() if pid_m else None
+
+        scan_files: list[Path] = []
+        if target_pid and (parts_dir / f"p{target_pid}.typ").exists():
+            scan_files.append(parts_dir / f"p{target_pid}.typ")
+        if parts_dir.exists():
+            for pf in sorted(parts_dir.glob("p*.typ")):
+                if pf not in scan_files:
+                    scan_files.append(pf)
         cap_file = Path(m["typst_project_dir"]) / f"{slug}.typ"
         if cap_file.exists():
             scan_files.append(cap_file)
+        def_slug = m.get("default_slug")
+        if def_slug and def_slug != slug:
+            def_file = Path(m["typst_project_dir"]) / f"{def_slug}.typ"
+            if def_file.exists():
+                scan_files.append(def_file)
+
         for tf in scan_files:
             try:
                 txt = tf.read_text(encoding="utf-8")
@@ -1557,7 +1573,12 @@ class AppuntiWindow(Adw.ApplicationWindow):
                 sm = SRC_PARAM_RX.search(fm.group(2))
                 if sm:
                     fname = Path(sm.group(1).strip()).name
-                    for pdir in cache_root.glob("p*"):
+                    # Prima cerca ESATTAMENTE nella cartella della parte corretta (p<target_pid>)
+                    if target_pid:
+                        exact = cache_root / f"p{target_pid}" / "images" / fname
+                        if exact.exists():
+                            return exact
+                    for pdir in sorted(cache_root.glob("p*")):
                         cand = pdir / "images" / fname
                         if cand.exists():
                             return cand

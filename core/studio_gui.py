@@ -38,13 +38,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.cetz_studio_view import CeTZStudioView
-from core.paths import ASSETS_DIR, BIN_DIR, load_config
+from core.paths import ASSETS_DIR, BIN_DIR, append_subject_to_config, load_config
 
 CORE_DIR = REPO_ROOT / "core"
 APPUNTI_BIN = BIN_DIR / "appunti"
 
 PROGRESS_PREFIX = "@@PROGRESS "
 FLAG_COUNT_RX = re.compile(r'#img-flag\(\s*"([^"]+)"')
+FLAG_SRC_LOOKUP_RX = re.compile(r'#img-flag\(\s*"([^"]+)"([^)]*)\)', re.DOTALL)
+SRC_PARAM_RX = re.compile(r'src\s*:\s*"([^"]+)"')
+FIG_MODES = [("hybrid", "Ibrida (CeTZ schemi + ritagli foto)"), ("cetz", "Tutto CeTZ"), ("mineru", "Solo ritagli MinerU (veloce)")]
+LLM_BACKENDS = [("agy", "Antigravity CLI (agy)"), ("gemini-api", "Gemini REST API (API key)")]
 
 CUSTOM_CSS = """
 .hero-card {
@@ -659,6 +663,11 @@ class AppuntiWindow(Adw.ApplicationWindow):
         self.materia_dd.connect("notify::selected", self.on_materia_changed)
         self.selector_box.append(self.materia_dd)
 
+        self.add_mat_btn = Gtk.Button(icon_name="list-add-symbolic")
+        self.add_mat_btn.set_tooltip_text("Aggiungi una nuova materia (Wizard)")
+        self.add_mat_btn.connect("clicked", lambda *_: self.on_add_subject_clicked())
+        self.selector_box.append(self.add_mat_btn)
+
         self.cap_dd = Gtk.DropDown()
         self.cap_dd.set_enable_search(True)
         self.cap_dd.set_tooltip_text("Seleziona il capitolo o modulo")
@@ -703,8 +712,14 @@ class AppuntiWindow(Adw.ApplicationWindow):
 
         main_box.append(self._build_hero_card())
         main_box.append(self._build_parts_section())
+        main_box.append(self._build_chapter_figures_section())
         main_box.append(self._build_options_section())
         main_box.append(self._build_log_card())
+
+        # Drag & Drop di .txt / audio / video sulla scheda Appunti
+        drop_app = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop_app.connect("drop", self.on_appunti_files_dropped)
+        scrolled.add_controller(drop_app)
 
         page_appunti = self.view_stack.add_titled(scrolled, "appunti", "Appunti")
         page_appunti.set_icon_name("accessories-text-editor-symbolic")
@@ -769,6 +784,10 @@ class AppuntiWindow(Adw.ApplicationWindow):
 
     def _build_menu_button(self) -> Gtk.MenuButton:
         menu = Gio.Menu()
+        sec0 = Gio.Menu()
+        sec0.append("Nuova materia…", "win.add-subject")
+        menu.append_section(None, sec0)
+
         sec1 = Gio.Menu()
         sec1.append("Apri cartella Prompt", "win.open-prompts")
         sec1.append("Apri config.toml", "win.open-config")
@@ -777,6 +796,10 @@ class AppuntiWindow(Adw.ApplicationWindow):
         sec2 = Gio.Menu()
         sec2.append("Pulisci file generati del capitolo…", "win.clean-chapter")
         menu.append_section(None, sec2)
+
+        act_add = Gio.SimpleAction.new("add-subject", None)
+        act_add.connect("activate", lambda *_: self.on_add_subject_clicked())
+        self.add_action(act_add)
 
         act_prompts = Gio.SimpleAction.new("open-prompts", None)
         act_prompts.connect("activate", lambda *_: subprocess.Popen(["xdg-open", str(self.cfg["general"]["prompts_dir"])]))
@@ -950,6 +973,23 @@ class AppuntiWindow(Adw.ApplicationWindow):
 
         return self.parts_group
 
+    def _build_chapter_figures_section(self) -> Gtk.Widget:
+        self.figs_group = Adw.PreferencesGroup()
+        self.figs_group.set_visible(False)
+        lb = Gtk.ListBox()
+        lb.set_selection_mode(Gtk.SelectionMode.NONE)
+        lb.add_css_class("boxed-list")
+        self.figs_group.add(lb)
+
+        self.figs_expander = Adw.ExpanderRow(
+            title="Figure del capitolo",
+            subtitle="Apri una figura direttamente in CeTZ Studio per rifinirla live",
+        )
+        self.figs_expander.add_prefix(Gtk.Image.new_from_icon_name("applications-graphics-symbolic"))
+        lb.append(self.figs_expander)
+        self._fig_rows: list[Gtk.Widget] = []
+        return self.figs_group
+
     def _build_options_section(self) -> Gtk.Widget:
         group = Adw.PreferencesGroup()
         listbox = Gtk.ListBox()
@@ -959,10 +999,40 @@ class AppuntiWindow(Adw.ApplicationWindow):
 
         self.opts_expander = Adw.ExpanderRow(
             title="Opzioni pipeline",
-            subtitle="MinerU OCR attivo · Check visivo attivo",
+            subtitle="MinerU OCR · Figure: Ibrida · Check visivo",
         )
         self.opts_expander.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
         listbox.append(self.opts_expander)
+
+        # Modalita figure: Ibrida / Tutto CeTZ / Solo ritagli MinerU
+        self.combo_fig_mode = Adw.ComboRow(
+            title="Modalità figure",
+            subtitle="Ibrida: CeTZ per schemi/grafici, ritaglio MinerU istantaneo per foto e sezioni reali",
+            model=Gtk.StringList.new([lbl for _, lbl in FIG_MODES]),
+        )
+        def_fm = self.cfg["general"].get("figures_mode", "hybrid")
+        for f in self.extra_flags:
+            if f.startswith("--figures-mode="):
+                def_fm = f.split("=", 1)[1].strip()
+        fm_ids = [k for k, _ in FIG_MODES]
+        self.combo_fig_mode.set_selected(fm_ids.index(def_fm) if def_fm in fm_ids else 0)
+        self.combo_fig_mode.connect("notify::selected", self.on_options_changed)
+        self.opts_expander.add_row(self.combo_fig_mode)
+
+        # Backend LLM: agy CLI vs Gemini REST API diretta
+        self.combo_backend = Adw.ComboRow(
+            title="Backend AI (LLM)",
+            subtitle="Usa Antigravity CLI (agy) oppure Gemini REST API diretta con GEMINI_API_KEY",
+            model=Gtk.StringList.new([lbl for _, lbl in LLM_BACKENDS]),
+        )
+        def_bk = self.cfg["general"].get("llm_backend", "agy")
+        for f in self.extra_flags:
+            if f.startswith("--backend="):
+                def_bk = f.split("=", 1)[1].strip()
+        bk_ids = [k for k, _ in LLM_BACKENDS]
+        self.combo_backend.set_selected(bk_ids.index(def_bk) if def_bk in bk_ids else 0)
+        self.combo_backend.connect("notify::selected", self.on_options_changed)
+        self.opts_expander.add_row(self.combo_backend)
 
         self.sw_mineru = Adw.SwitchRow(
             title="Usa MinerU OCR + ritaglio figure (--mineru)",
@@ -1157,12 +1227,27 @@ class AppuntiWindow(Adw.ApplicationWindow):
         self.sw_force_ocr.set_active(True)
         self.show_toast("Forza OCR attivato (--force-ocr)")
 
+    def current_figures_mode(self) -> str:
+        idx = self.combo_fig_mode.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(FIG_MODES):
+            return "hybrid"
+        return FIG_MODES[idx][0]
+
+    def current_backend(self) -> str:
+        idx = self.combo_backend.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(LLM_BACKENDS):
+            return "agy"
+        return LLM_BACKENDS[idx][0]
+
     def _update_options_summary(self) -> None:
         if self.sw_mineru.get_active():
-            parser_str = "Parser: MinerU (Forza OCR)" if self.sw_force_ocr.get_active() else "Parser: MinerU OCR"
+            parser_str = "MinerU (Forza OCR)" if self.sw_force_ocr.get_active() else "MinerU OCR"
         else:
-            parser_str = "Parser: PDF crudo"
-        active: list[str] = [parser_str]
+            parser_str = "PDF crudo"
+        fm_map = {"hybrid": "Figure: Ibrida", "cetz": "Figure: Tutto CeTZ", "mineru": "Figure: Solo ritagli"}
+        active: list[str] = [parser_str, fm_map.get(self.current_figures_mode(), "Figure: Ibrida")]
+        if self.current_backend() == "gemini-api":
+            active.append("Gemini REST API")
         if self.sw_visual.get_active():
             active.append("Check visivo")
         if self.sw_transcribe.get_active():
@@ -1446,7 +1531,247 @@ class AppuntiWindow(Adw.ApplicationWindow):
             list_row.set_child(row_box)
             self.parts_listbox.append(list_row)
 
+        self.refresh_chapter_figures_ui()
         self.refresh_action_buttons()
+
+    def _find_orig_crop_for_fig(self, m: dict[str, Any], fig_id: str) -> Path | None:
+        slug = m.get("chapter_slug", f"cap{m['capitolo']}")
+        parts_dir = Path(m["typst_project_dir"]) / "_parts" / slug
+        work_dir = Path(self.cfg["general"]["work_dir"]).expanduser()
+        cache_root = work_dir / "mineru_cache" / f"{m['materia']}_cap{m['capitolo']}"
+        if not cache_root.exists():
+            return None
+        # Cerca il parametro src: nel #img-flag corrispondente
+        scan_files = list(parts_dir.glob("p*.typ")) if parts_dir.exists() else []
+        cap_file = Path(m["typst_project_dir"]) / f"{slug}.typ"
+        if cap_file.exists():
+            scan_files.append(cap_file)
+        for tf in scan_files:
+            try:
+                txt = tf.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for fm in FLAG_SRC_LOOKUP_RX.finditer(txt):
+                if fm.group(1).strip() != fig_id:
+                    continue
+                sm = SRC_PARAM_RX.search(fm.group(2))
+                if sm:
+                    fname = Path(sm.group(1).strip()).name
+                    for pdir in cache_root.glob("p*"):
+                        cand = pdir / "images" / fname
+                        if cand.exists():
+                            return cand
+        return None
+
+    def refresh_chapter_figures_ui(self) -> None:
+        for r in self._fig_rows:
+            self.figs_expander.remove(r)
+        self._fig_rows.clear()
+
+        m = self.current_manifest
+        if not m or m["missing"]["chapter_not_found"]:
+            self.figs_group.set_visible(False)
+            return
+
+        figs_dir = Path(m["typst_project_dir"]) / m["figs_dir"]
+        prefix = f"{m['materia']}-c{m['capitolo']}-"
+        found: dict[str, Path] = {}
+        if figs_dir.exists():
+            for p in sorted(figs_dir.iterdir()):
+                if not p.is_file() or not p.name.startswith(prefix):
+                    continue
+                if p.suffix == ".typ":
+                    found[p.stem] = p
+                elif p.suffix.lower() in (".png", ".jpg", ".jpeg") and p.stem not in found:
+                    found[p.stem] = p
+
+        if not found:
+            self.figs_group.set_visible(False)
+            return
+
+        self.figs_group.set_visible(True)
+        self.figs_expander.set_title(f"Figure del capitolo ({len(found)})")
+        self.figs_expander.set_subtitle("Clicca su una figura per rifinirla in CeTZ Studio con aggiornamento live")
+
+        for fid, fpath in sorted(found.items()):
+            is_cetz = fpath.suffix == ".typ"
+            row = Adw.ActionRow(
+                title=fid,
+                subtitle="Vettoriale CeTZ (.typ)" if is_cetz else f"Ritaglio immagine ({fpath.name})",
+            )
+            badge = Gtk.Label(label="CeTZ" if is_cetz else "Ritaglio")
+            badge.add_css_class("status-badge")
+            badge.add_css_class("badge-ready" if is_cetz else "badge-generated")
+            badge.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(badge)
+
+            btn_edit = Gtk.Button(label="Modifica in CeTZ Studio")
+            btn_edit.set_valign(Gtk.Align.CENTER)
+            btn_edit.connect(
+                "clicked",
+                lambda *_, _fid=fid, _fp=fpath, _fd=figs_dir: self._open_fig_in_studio(_fid, _fp, _fd),
+            )
+            row.add_suffix(btn_edit)
+            self.figs_expander.add_row(row)
+            self._fig_rows.append(row)
+
+    def _open_fig_in_studio(self, fig_id: str, fig_path: Path, figs_dir: Path) -> None:
+        orig = self._find_orig_crop_for_fig(self.current_manifest, fig_id) if self.current_manifest else None
+        self.view_stack.set_visible_child_name("cetz")
+        self.cetz_view.open_project_figure(
+            fig_id=fig_id,
+            fig_path=fig_path,
+            figs_dir=figs_dir,
+            orig_img=orig,
+            on_saved=lambda: GLib.idle_add(self.refresh_chapter_figures_ui),
+        )
+
+    def on_appunti_files_dropped(self, _target: Gtk.DropTarget, value: Any, _x: float, _y: float) -> bool:
+        if self.proc is not None or not self.current_manifest or not isinstance(value, Gdk.FileList):
+            return False
+        chap_dir_str = self.current_manifest.get("chapter_dir")
+        if not chap_dir_str:
+            return False
+        chap_dir = Path(chap_dir_str)
+        files = [Path(f.get_path()) for f in value.get_files() if f.get_path()]
+        supported = [
+            f
+            for f in files
+            if f.suffix.lower() in (".txt", ".mp4", ".mkv", ".webm", ".mov", ".mp3", ".wav", ".m4a", ".ogg")
+        ]
+        if not supported:
+            self.show_toast("Trascina file .txt oppure audio/video per associarli al capitolo")
+            return False
+
+        missing_parts = list(self.current_manifest["missing"]["parts_without_txt"])
+        mat = self.current_manifest["materia"].upper()
+        cap = self.current_manifest["capitolo"]
+        copied = 0
+        for src in supported:
+            # Se il nome file contiene già il pattern del capitolo, copialo direttamente; altrimenti abbinalo alla prima parte senza .txt
+            if re.search(rf"{mat}\s*0?{cap}[-_]\d+", src.name, re.IGNORECASE):
+                dst = chap_dir / src.name
+            elif missing_parts:
+                pid = missing_parts.pop(0)
+                dst = chap_dir / f"{mat}{cap:02d}_{pid}{src.suffix.lower()}"
+            else:
+                dst = chap_dir / src.name
+            shutil.copy2(src, dst)
+            copied += 1
+            self.append_log_line(f"✓ File trascinato in capitolo: {src.name} -> {dst.name}\n")
+
+        self.show_toast(f"{copied} file aggiunti al capitolo")
+        self.discover_current(preserve_selection=True)
+        return True
+
+    def on_add_subject_clicked(self) -> None:
+        dlg = Adw.Dialog(title="Nuova materia", content_width=520, content_height=460)
+        tv = Adw.ToolbarView()
+        dlg.set_child(tv)
+
+        hdr = Adw.HeaderBar()
+        btn_save = Gtk.Button(label="Salva materia")
+        btn_save.add_css_class("suggested-action")
+        hdr.pack_end(btn_save)
+        tv.add_top_bar(hdr)
+
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        tv.set_content(sw)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(14)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        sw.set_child(box)
+
+        grp = Adw.PreferencesGroup(
+            title="Dettagli materia",
+            description="Verrà aggiunta automaticamente al tuo config.toml",
+        )
+        box.append(grp)
+
+        row_id = Adw.EntryRow(title="ID breve (es. fluidi, fisica)")
+        row_name = Adw.EntryRow(title="Nome completo (es. Meccanica dei Fluidi)")
+        row_src = Adw.EntryRow(title="Cartella sorgente PDF / .txt")
+        row_proj = Adw.EntryRow(title="Cartella progetto locale LocalTypst")
+        row_layout = Adw.ComboRow(
+            title="Organizzazione file",
+            model=Gtk.StringList.new(["Sottocartelle per capitolo (01 - Titolo)", "File piatti (modulo1.pdf)"]),
+        )
+
+        def pick_dir(target_row: Adw.EntryRow) -> None:
+            fd = Gtk.FileDialog(title=f"Seleziona {target_row.get_title()}")
+
+            def on_done(d: Gtk.FileDialog, res: Gio.AsyncResult) -> None:
+                try:
+                    gf = d.select_folder_finish(res)
+                    if gf and gf.get_path():
+                        target_row.set_text(gf.get_path())
+                except Exception:
+                    pass
+
+            fd.select_folder(self, None, on_done)
+
+        b_src = Gtk.Button(icon_name="folder-open-symbolic")
+        b_src.set_valign(Gtk.Align.CENTER)
+        b_src.add_css_class("flat")
+        b_src.connect("clicked", lambda *_: pick_dir(row_src))
+        row_src.add_suffix(b_src)
+
+        b_proj = Gtk.Button(icon_name="folder-open-symbolic")
+        b_proj.set_valign(Gtk.Align.CENTER)
+        b_proj.add_css_class("flat")
+        b_proj.connect("clicked", lambda *_: pick_dir(row_proj))
+        row_proj.add_suffix(b_proj)
+
+        def auto_fill_proj(*_: Any) -> None:
+            k = re.sub(r"[^a-zA-Z0-9_]+", "_", row_id.get_text().strip()).strip("_")
+            if k and (not row_proj.get_text().strip() or "LocalTypst/projects/Appunti_" in row_proj.get_text()):
+                row_proj.set_text(str(Path.home() / f"Documents/LocalTypst/projects/Appunti_{k.upper()}_Locale"))
+
+        row_id.connect("changed", auto_fill_proj)
+
+        for r in (row_id, row_name, row_src, row_proj, row_layout):
+            grp.add(r)
+
+        def do_save(*_: Any) -> None:
+            key = re.sub(r"[^a-z0-9_]+", "_", row_id.get_text().strip().lower()).strip("_")
+            name = row_name.get_text().strip() or key.upper()
+            src = row_src.get_text().strip()
+            proj = row_proj.get_text().strip()
+            if not key or not src or not proj:
+                self.show_toast("Compila ID breve, cartella sorgente e cartella progetto")
+                return
+            if key in self.cfg.get("materie", {}):
+                self.show_toast(f"La materia '{key}' esiste già in config.toml")
+                return
+            layout = "subfolders" if row_layout.get_selected() == 0 else "flat_files"
+            try:
+                append_subject_to_config(
+                    self.config_path,
+                    key=key,
+                    name=name,
+                    source_dir=src,
+                    typst_project_dir=proj,
+                    layout=layout,
+                )
+                self.config_path, self.cfg = load_config(self.config_path)
+                self.materie = list(self.cfg.get("materie", {}).keys())
+                mat_labels = [f"{k.upper()}" if len(k) <= 4 else k.capitalize() for k in self.materie]
+                self._suppress_dropdown_cb = True
+                self.materia_dd.set_model(Gtk.StringList.new(mat_labels))
+                self.materia_dd.set_selected(self.materie.index(key))
+                self._populate_chapters(prefer_cap=None)
+                self._suppress_dropdown_cb = False
+                self.discover_current(preserve_selection=False)
+                dlg.close()
+                self.show_toast(f"Materia '{name}' aggiunta!")
+            except Exception as exc:
+                self.show_toast(f"Errore salvataggio: {exc}")
+
+        btn_save.connect("clicked", do_save)
+        dlg.present(self)
 
     def get_selected_part_ids(self) -> list[str]:
         return [pid for pid, chk in self.part_checks.items() if chk.get_active()]
@@ -1900,7 +2225,16 @@ class AppuntiWindow(Adw.ApplicationWindow):
         total_pdf_parts = [p["part_id"] for p in m["parts"] if p.get("pdf")]
         by_id = {p["part_id"]: p for p in m["parts"]}
 
-        cmd = [str(APPUNTI_BIN), mat, str(cap), "--config", str(self.config_path), "--no-gui"]
+        cmd = [
+            str(APPUNTI_BIN),
+            mat,
+            str(cap),
+            "--config",
+            str(self.config_path),
+            "--no-gui",
+            f"--figures-mode={self.current_figures_mode()}",
+            f"--backend={self.current_backend()}",
+        ]
         if len(selected) < len(total_pdf_parts):
             cmd.append(f"--part={','.join(selected)}")
         cmd.append("--mineru" if self.sw_mineru.get_active() else "--no-mineru")

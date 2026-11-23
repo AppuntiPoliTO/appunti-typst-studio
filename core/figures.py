@@ -22,12 +22,13 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.agy_client import AgyStreamSession, call_agy_oneshot
-from core.paths import load_config
+from core.agy_client import call_llm_oneshot, create_llm_session
+from core.paths import TEMPLATES_DIR, load_config
 
 
 def emit_progress(**payload: Any) -> None:
     print(f"@@PROGRESS {json.dumps(payload, ensure_ascii=False)}", flush=True)
+
 
 FLAG_RX = re.compile(
     r'#img-flag\(\s*"([^"]+)"(?P<args>[^)]*)\)',
@@ -35,8 +36,30 @@ FLAG_RX = re.compile(
 )
 PAGE_RX = re.compile(r'pagina\s*:\s*(\d+)')
 SRC_RX = re.compile(r'src\s*:\s*"([^"]+)"')
+KIND_RX = re.compile(r'kind\s*:\s*"([^"]+)"')
 DESC_RX = re.compile(r'desc\s*:\s*"((?:[^"\\]|\\.)*)"', re.DOTALL)
 PART_FROM_ID_RX = re.compile(r'^[^-]+-c\d+-p([^-]+)-\d+$', re.IGNORECASE)
+
+HYBRID_KEEP_CROP_RX = re.compile(
+    r"\b(fotografia|foto|microscopia|fotogramma|vista\s+reale|sezione\s+costruttiva|disegno\s+costruttivo|"
+    r"esploso|catalogo|reale|pezzo\s+rotto|frattografia)\b",
+    re.IGNORECASE,
+)
+
+
+def should_use_direct_crop(fl: dict[str, Any], mode: str, has_crop: bool) -> bool:
+    if not has_crop:
+        return False
+    if mode == "mineru":
+        return True
+    if mode == "cetz":
+        return False
+    kind = (fl.get("kind") or "").strip().lower()
+    if kind in ("photo", "complex", "crop", "image", "real"):
+        return True
+    if kind in ("diagram", "schema", "graph", "chart", "cetz"):
+        return False
+    return bool(HYBRID_KEEP_CROP_RX.search(fl.get("desc") or ""))
 
 
 def parse_flags(typ_files: list[Path]) -> list[dict[str, Any]]:
@@ -58,6 +81,7 @@ def parse_flags(typ_files: list[Path]) -> list[dict[str, Any]]:
             args_str = m.group("args")
             pm = PAGE_RX.search(args_str)
             sm = SRC_RX.search(args_str)
+            km = KIND_RX.search(args_str)
             dm = DESC_RX.search(args_str)
             id_m = PART_FROM_ID_RX.match(fid)
             part_id = id_m.group(1).lower() if id_m else file_part
@@ -67,6 +91,7 @@ def parse_flags(typ_files: list[Path]) -> list[dict[str, Any]]:
                     "part_id": part_id,
                     "pagina": int(pm.group(1)) if pm else 1,
                     "src": sm.group(1).strip() if sm else None,
+                    "kind": km.group(1).strip().lower() if km else None,
                     "desc": dm.group(1).replace('\\"', '"') if dm else "",
                     "source_file": str(tf),
                 }
@@ -123,17 +148,22 @@ def extract_cetz_code(raw: str) -> str:
 
 
 def compile_wrapper(typst_bin: str, code: str, tmp_dir: Path) -> tuple[bool, str]:
-    wrapper = tmp_dir / "wrapper.typ"
-    pdf_out = tmp_dir / "wrapper.pdf"
+    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
+    if macros_src.exists() and not (tmp_dir / "cetz-macros.typ").exists():
+        shutil.copy2(macros_src, tmp_dir / "cetz-macros.typ")
+    sub = tmp_dir / "figs"
+    sub.mkdir(exist_ok=True)
+    wrapper = sub / "wrapper.typ"
+    pdf_out = sub / "wrapper.pdf"
     body = code
-    if '@preview/cetz:' not in body:
+    if "@preview/cetz:" not in body and "cetz-macros.typ" not in body:
         body = '#import "@preview/cetz:0.3.4": canvas, draw\n' + body
     wrapper.write_text(
         "#set page(width: auto, height: auto, margin: 0.4cm)\n" + body,
         encoding="utf-8",
     )
     res = subprocess.run(
-        [typst_bin, "compile", str(wrapper), str(pdf_out)],
+        [typst_bin, "compile", "--root", str(tmp_dir), str(wrapper), str(pdf_out)],
         capture_output=True,
         text=True,
     )
@@ -247,11 +277,25 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--force", action="store_true", help="Rigenera anche figure esistenti")
     parser.add_argument("--mineru-dir", type=Path, default=None, help="Directory cache MinerU del capitolo")
+    parser.add_argument(
+        "--figures-mode",
+        choices=("cetz", "hybrid", "mineru"),
+        default=None,
+        help="Modalità figure: cetz (tutto CeTZ), hybrid (ritaglio foto/complesse + CeTZ schemi), mineru (solo ritagli)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("agy", "gemini-api"),
+        default=None,
+        help="Backend LLM per generazione figure CeTZ",
+    )
     args = parser.parse_args()
 
     _, cfg = load_config(args.config)
     general = cfg["general"]
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    figures_mode = args.figures_mode or general.get("figures_mode", "hybrid")
+    backend = args.backend or general.get("llm_backend", "agy")
 
     prompt_file = Path(general["prompts_dir"]) / "figure.md"
     if not prompt_file.exists():
@@ -262,6 +306,9 @@ def main() -> int:
     typst_dir = Path(manifest["typst_project_dir"])
     figs_dir = typst_dir / manifest["figs_dir"]
     figs_dir.mkdir(parents=True, exist_ok=True)
+    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
+    if macros_src.exists() and not (typst_dir / "cetz-macros.typ").exists():
+        shutil.copy2(macros_src, typst_dir / "cetz-macros.typ")
 
     part_pdfs = {
         p["part_id"].lower(): Path(p["pdf"])
@@ -276,23 +323,34 @@ def main() -> int:
     report: dict[str, Any] = {
         "materia": manifest["materia"],
         "capitolo": manifest["capitolo"],
+        "figures_mode": figures_mode,
+        "backend": backend,
         "total_flags": len(flags),
         "succeeded": [],
+        "direct_crops": [],
         "skipped_existing": [],
         "fallback_png": [],
         "errors": [],
     }
 
-    pending_flags: list[dict[str, Any]] = []
+    direct_crop_flags: list[tuple[dict[str, Any], Path]] = []
+    pending_cetz_flags: list[dict[str, Any]] = []
     skipped_flags: list[dict[str, Any]] = []
     for fl in flags:
-        out_typ = figs_dir / f"{fl['id']}.typ"
-        if out_typ.exists() and not args.force:
+        fid = fl["id"]
+        out_typ = figs_dir / f"{fid}.typ"
+        out_img_exists = any((figs_dir / f"{fid}{ext}").exists() for ext in (".jpg", ".jpeg", ".png"))
+        if not args.force and (out_typ.exists() or (figures_mode == "mineru" and out_img_exists)):
             skipped_flags.append(fl)
+            continue
+        crop_src = resolve_mineru_crop(args.mineru_dir, fl["part_id"], fl.get("src"))
+        if should_use_direct_crop(fl, figures_mode, crop_src is not None):
+            assert crop_src is not None
+            direct_crop_flags.append((fl, crop_src))
         else:
-            pending_flags.append(fl)
+            pending_cetz_flags.append(fl)
 
-    to_generate = len(pending_flags)
+    to_generate = len(pending_cetz_flags)
     emit_progress(
         phase="figures",
         status="plan",
@@ -319,11 +377,36 @@ def main() -> int:
             item=fid,
         )
 
-    batches = build_batches(pending_flags, batch_size)
+    # Inserimento istantaneo (0s) dei ritagli MinerU diretti (modalita mineru o hybrid su foto/sezioni complesse)
+    for fl, crop_src in direct_crop_flags:
+        fid = fl["id"]
+        dst_img = figs_dir / f"{fid}{crop_src.suffix.lower()}"
+        shutil.copy2(crop_src, dst_img)
+        old_typ = figs_dir / f"{fid}.typ"
+        if old_typ.exists():
+            old_typ.unlink()
+        report["direct_crops"].append(fid)
+        update_figs_index(figs_dir)
+        done_count += 1
+        print(
+            f"  ✓ Figura {fid} inserita direttamente da ritaglio MinerU ({crop_src.name}, modalità {figures_mode})",
+            flush=True,
+        )
+        emit_progress(
+            phase="figures",
+            status="item_skip",
+            done=done_count,
+            total=len(flags),
+            to_generate=to_generate,
+            done_generated=done_generated,
+            item=f"{fid} (ritaglio MinerU)",
+        )
+
+    batches = build_batches(pending_cetz_flags, batch_size)
     if batches:
         print(
-            f"Sessioni agy pianificate: {len(batches)} blocchi per {to_generate} figure "
-            f"(max {batch_size} figure/sessione).",
+            f"Sessioni {backend} pianificate: {len(batches)} blocchi per {to_generate} figure CeTZ "
+            f"(modalità={figures_mode}, max {batch_size}/sessione).",
             flush=True,
         )
 
@@ -335,7 +418,12 @@ def main() -> int:
                 f"({len(batch)} figure: {[x['id'] for x in batch]}) ---",
                 flush=True,
             )
-            with AgyStreamSession(general["agy_bin"], general["model_figures"], tmp_dir) as sess:
+            with create_llm_session(
+                general,
+                model=general["model_figures"],
+                add_dirs=tmp_dir,
+                backend=backend,
+            ) as sess:
                 for fl in batch:
                     fid = fl["id"]
                     out_typ = figs_dir / f"{fid}.typ"
@@ -409,11 +497,10 @@ def main() -> int:
                         include_full_rules=first_in_session,
                         is_cropped=is_cropped,
                     )
-                    rc, out, err = sess.send(fig_prompt)
+                    rc, out, err = sess.send(fig_prompt, files=[page_img])
                     used_stream = rc == 0
                     if rc != 0:
-                        # Fallback resiliente a chiamata singola se la sessione stream si è interrotta
-                        print(f"  Avviso sessione stream ({err[:100]}), riprovo in modalità singola...", flush=True)
+                        print(f"  Avviso sessione ({err[:100]}), riprovo in modalità singola...", flush=True)
                         full_prompt = build_figure_prompt(
                             prompt_text,
                             page_img,
@@ -421,8 +508,13 @@ def main() -> int:
                             include_full_rules=True,
                             is_cropped=is_cropped,
                         )
-                        rc, out, err = call_agy_oneshot(
-                            general["agy_bin"], general["model_figures"], tmp_dir, full_prompt
+                        rc, out, err = call_llm_oneshot(
+                            general,
+                            model=general["model_figures"],
+                            add_dirs=tmp_dir,
+                            prompt=full_prompt,
+                            files=[page_img],
+                            backend=backend,
                         )
                         used_stream = False
 
@@ -430,7 +522,7 @@ def main() -> int:
                     ok, comp_err = (
                         compile_wrapper(general["typst_bin"], code, tmp_dir)
                         if code
-                        else (False, f"agy error: {err[:300]}")
+                        else (False, f"LLM error: {err[:300]}")
                     )
 
                     for attempt in range(1, max_retries + 1):
@@ -453,21 +545,28 @@ def main() -> int:
                             rc, out, err = sess.send(fix_prompt)
                             if rc != 0:
                                 used_stream = False
-                                rc, out, err = call_agy_oneshot(
-                                    general["agy_bin"],
-                                    general["model_figures"],
-                                    tmp_dir,
-                                    build_fix_prompt(code, comp_err, in_same_session=False),
+                                rc, out, err = call_llm_oneshot(
+                                    general,
+                                    model=general["model_figures"],
+                                    add_dirs=tmp_dir,
+                                    prompt=build_fix_prompt(code, comp_err, in_same_session=False),
+                                    files=[page_img],
+                                    backend=backend,
                                 )
                         else:
-                            rc, out, err = call_agy_oneshot(
-                                general["agy_bin"], general["model_figures"], tmp_dir, fix_prompt
+                            rc, out, err = call_llm_oneshot(
+                                general,
+                                model=general["model_figures"],
+                                add_dirs=tmp_dir,
+                                prompt=fix_prompt,
+                                files=[page_img],
+                                backend=backend,
                             )
                         if rc == 0 and out.strip():
                             code = extract_cetz_code(out)
                             ok, comp_err = compile_wrapper(general["typst_bin"], code, tmp_dir)
                         else:
-                            comp_err = f"agy retry error: {err[:300]}"
+                            comp_err = f"LLM retry error: {err[:300]}"
 
                     if ok:
                         out_typ.write_text(code, encoding="utf-8")

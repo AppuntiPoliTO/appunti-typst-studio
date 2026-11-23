@@ -21,7 +21,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-from .agy_client import AgyStreamSession
+from .agy_client import create_llm_session
 from .cetz_engine import (
     apply_typ_replacements,
     convert_single_image,
@@ -30,7 +30,8 @@ from .cetz_engine import (
     refine_cetz_code,
     render_cetz_png,
 )
-from .models import AGY_GEMINI_MODELS, AGY_MODEL_IDS
+from .figures import update_figs_index
+from .models import AGY_GEMINI_MODELS, AGY_MODEL_IDS, GEMINI_API_MODEL_IDS, GEMINI_API_MODELS
 
 
 def _fmt_sec(sec: float | None) -> str:
@@ -104,30 +105,39 @@ class CeTZStudioView(Gtk.Box):
         paned.set_resize_start_child(False)
         paned.set_shrink_start_child(False)
 
+        # Drag & Drop di immagini o file .typ direttamente sulla scheda CeTZ Studio
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop.connect("drop", self.on_files_dropped)
+        self.add_controller(drop)
+
     def _build_sidebar(self) -> Gtk.Widget:
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         side.set_margin_top(14)
         side.set_margin_bottom(14)
         side.set_margin_start(14)
         side.set_margin_end(10)
-        side.set_size_request(290, -1)
+        side.set_size_request(295, -1)
 
-        # Card controlli sorgente e modello
-        ctrl_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        # Card controlli sorgente, backend e modello
+        ctrl_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
         ctrl_card.add_css_class("card")
         ctrl_card.add_css_class("cetz-side-card")
         side.append(ctrl_card)
 
-        lbl_m = Gtk.Label(label="Modello Gemini", xalign=0)
-        lbl_m.add_css_class("caption-heading")
-        lbl_m.add_css_class("dim-label")
-        ctrl_card.append(lbl_m)
+        lbl_b = Gtk.Label(label="Backend & Modello Gemini", xalign=0)
+        lbl_b.add_css_class("caption-heading")
+        lbl_b.add_css_class("dim-label")
+        ctrl_card.append(lbl_b)
 
-        model_labels = [label for _, label in AGY_GEMINI_MODELS]
-        self.model_dd = Gtk.DropDown.new_from_strings(model_labels)
-        default_m = self.gen.get("model_cetz_studio", "gemini-4-hydrogen-high")
-        if default_m in AGY_MODEL_IDS:
-            self.model_dd.set_selected(AGY_MODEL_IDS.index(default_m))
+        self.backend_dd = Gtk.DropDown.new_from_strings(["Antigravity CLI (agy)", "Gemini REST API (API key)"])
+        if self.gen.get("llm_backend") == "gemini-api":
+            self.backend_dd.set_selected(1)
+        self.backend_dd.connect("notify::selected", self.on_backend_changed)
+        ctrl_card.append(self.backend_dd)
+
+        self._active_model_ids: list[str] = []
+        self.model_dd = Gtk.DropDown()
+        self._populate_models_for_backend()
         ctrl_card.append(self.model_dd)
 
         # Azioni aggiunta immagini / conversione .typ
@@ -272,6 +282,23 @@ class CeTZStudioView(Gtk.Box):
         self.btn_save_typ.connect("clicked", self.on_save_typ)
         self.typ_bar.append(self.btn_save_typ)
 
+        # Barra modifica figura del progetto (ponte diretto dalla scheda Appunti)
+        self.proj_fig_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.proj_fig_bar.add_css_class("card")
+        self.proj_fig_bar.add_css_class("cetz-side-card")
+        self.proj_fig_bar.set_visible(False)
+        right.append(self.proj_fig_bar)
+
+        self.lbl_proj_fig = Gtk.Label(xalign=0, hexpand=True)
+        self.lbl_proj_fig.set_ellipsize(Pango.EllipsizeMode.END)
+        self.proj_fig_bar.append(self.lbl_proj_fig)
+
+        self.btn_save_proj_fig = Gtk.Button(label="Salva nel progetto (Live LocalTypst)")
+        self.btn_save_proj_fig.add_css_class("suggested-action")
+        self.btn_save_proj_fig.add_css_class("pill")
+        self.btn_save_proj_fig.connect("clicked", self.on_save_project_figure)
+        self.proj_fig_bar.append(self.btn_save_proj_fig)
+
         # Confronto fianco a fianco Originale vs CeTZ
         cmp_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, homogeneous=True)
         cmp_box.set_vexpand(True)
@@ -346,11 +373,144 @@ class CeTZStudioView(Gtk.Box):
 
     # --- Helpers ---
 
+    def current_backend(self) -> str:
+        return "gemini-api" if self.backend_dd.get_selected() == 1 else "agy"
+
+    def _populate_models_for_backend(self) -> None:
+        if self.current_backend() == "gemini-api":
+            pairs = GEMINI_API_MODELS
+            default_m = self.gen.get("gemini_api_model", "gemini-2.5-pro")
+        else:
+            pairs = AGY_GEMINI_MODELS
+            default_m = self.gen.get("model_cetz_studio", "gemini-4-hydrogen-high")
+        self._active_model_ids = [p[0] for p in pairs]
+        self.model_dd.set_model(Gtk.StringList.new([p[1] for p in pairs]))
+        if default_m in self._active_model_ids:
+            self.model_dd.set_selected(self._active_model_ids.index(default_m))
+        else:
+            self.model_dd.set_selected(0)
+
+    def on_backend_changed(self, *_: Any) -> None:
+        self._populate_models_for_backend()
+
     def current_model(self) -> str:
         idx = self.model_dd.get_selected()
-        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(AGY_MODEL_IDS):
-            return AGY_MODEL_IDS[0]
-        return AGY_MODEL_IDS[idx]
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self._active_model_ids):
+            return self._active_model_ids[0]
+        return self._active_model_ids[idx]
+
+    def on_files_dropped(self, _target: Gtk.DropTarget, value: Any, _x: float, _y: float) -> bool:
+        if self._busy or not isinstance(value, Gdk.FileList):
+            return False
+        files = value.get_files()
+        paths = [Path(f.get_path()) for f in files if f.get_path()]
+        if not paths:
+            return False
+        typ_files = [p for p in paths if p.suffix.lower() == ".typ"]
+        img_files = [p for p in paths if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
+        if typ_files:
+            self._start_typ_conversion(typ_files[0])
+            return True
+        if img_files:
+            self._enqueue_images(img_files)
+            return True
+        self.toast_cb("Trascina immagini (PNG/JPG/WebP) oppure un file .typ")
+        return False
+
+    def open_project_figure(
+        self,
+        *,
+        fig_id: str,
+        fig_path: Path,
+        figs_dir: Path,
+        orig_img: Path | None = None,
+        on_saved: Callable[[], None] | None = None,
+    ) -> None:
+        """Apre una figura già generata dalla pipeline direttamente in CeTZ Studio per rifinirla live."""
+        if self._busy:
+            self.toast_cb("Attendi il termine dell'elaborazione corrente in CeTZ Studio")
+            return
+        if self.typ_state:
+            self.clear_all()
+
+        code = ""
+        is_typ = fig_path.suffix.lower() == ".typ" and fig_path.exists()
+        if is_typ:
+            code = fig_path.read_text(encoding="utf-8").strip()
+
+        display_orig = orig_img if (orig_img and orig_img.exists()) else (fig_path if not is_typ else None)
+        stem = f"proj_{fig_id}_{int(time.time())}"
+        png_out = ""
+        status = "Pronto" if is_typ else "Ritaglio (convertibile)"
+        ok = False
+        err = ""
+        if is_typ and code:
+            ok, pp, comp_err = render_cetz_png(self.typst_bin, code, self.backup_dir, stem)
+            png_out = str(pp) if ok else ""
+            if not ok:
+                status = "Errore Typst"
+                err = comp_err
+
+        it = {
+            "path": display_orig,
+            "name": f"{fig_id} (progetto)",
+            "stem": stem,
+            "st": status,
+            "code": code,
+            "png": png_out,
+            "ok": ok,
+            "err": err,
+            "keep_orig": False,
+            "dirty": False,
+            "project_target": {
+                "fig_id": fig_id,
+                "figs_dir": figs_dir,
+                "on_saved": on_saved,
+            },
+        }
+        self.items.append(it)
+        self._append_queue_row(it)
+        self.code_exp.set_expanded(True)
+        self.select_index(len(self.items) - 1)
+        if not is_typ:
+            self.toast_cb(f"Aperto ritaglio '{fig_id}': scrivi un'istruzione o premi Modifica AI per vettorializzarlo in CeTZ")
+        else:
+            self.toast_cb(f"Figura '{fig_id}' caricata in CeTZ Studio")
+
+    def on_save_project_figure(self, *_: Any) -> None:
+        if self.selected_idx < 0 or self.selected_idx >= len(self.items):
+            return
+        it = self.items[self.selected_idx]
+        target = it.get("project_target")
+        if not target:
+            return
+        code = self.code_buf.get_text(self.code_buf.get_start_iter(), self.code_buf.get_end_iter(), True).strip()
+        if not code:
+            self.toast_cb("Nessun codice CeTZ da salvare")
+            return
+        if "@preview/cetz:" not in code and "cetz-macros.typ" not in code:
+            code = '#import "@preview/cetz:0.3.4": canvas, draw\n' + code
+        ok, pp, err = render_cetz_png(self.typst_bin, code, self.backup_dir, it["stem"])
+        if not ok:
+            self._update_item(self.selected_idx, {"ok": False, "status": "Errore Typst", "code": code, "png": "", "err": err})
+            self.toast_cb("Impossibile salvare: errore di compilazione Typst")
+            return
+
+        figs_dir: Path = target["figs_dir"]
+        fig_id: str = target["fig_id"]
+        out_typ = figs_dir / f"{fig_id}.typ"
+        tmp_typ = figs_dir / f"{fig_id}.typ.tmp"
+        tmp_typ.write_text(code + "\n", encoding="utf-8")
+        tmp_typ.replace(out_typ)
+        for ext in (".png", ".jpg", ".jpeg"):
+            old_img = figs_dir / f"{fig_id}{ext}"
+            if old_img.exists():
+                old_img.unlink()
+        update_figs_index(figs_dir)
+        self._update_item(self.selected_idx, {"ok": True, "status": "Pronto", "code": code, "png": str(pp), "err": ""})
+        self.toast_cb(f"Salvato {out_typ.name} — LocalTypst aggiornato live!")
+        if target.get("on_saved"):
+            target["on_saved"]()
 
     def _set_busy(self, busy: bool, total: int = 0, label: str = "") -> None:
         self._busy = busy
@@ -480,6 +640,12 @@ class CeTZStudioView(Gtk.Box):
             self.lbl_typ_review.set_text(
                 f"Revisione: {Path(self.typ_state['path']).name}  ({idx + 1}/{len(self.items)})"
             )
+        target = it.get("project_target")
+        if target:
+            self.proj_fig_bar.set_visible(True)
+            self.lbl_proj_fig.set_text(f"Figura progetto: {target['fig_id']}.typ ({target['figs_dir'].parent.name})")
+        else:
+            self.proj_fig_bar.set_visible(False)
 
     def _update_item(self, idx: int, res: dict[str, Any]) -> None:
         if idx < 0 or idx >= len(self.items):
@@ -562,8 +728,10 @@ class CeTZStudioView(Gtk.Box):
         except Exception:
             return
         paths = [Path(f.get_path()) for f in files if f.get_path()]
-        if not paths:
-            return
+        if paths:
+            self._enqueue_images(paths)
+
+    def _enqueue_images(self, paths: list[Path]) -> None:
         if self.typ_state:
             self.clear_all()
         start_idx = len(self.items)
@@ -590,30 +758,37 @@ class CeTZStudioView(Gtk.Box):
         if self._busy:
             return
         pending = [
-            i for i, it in enumerate(self.items) if it["st"] in ("In coda", "Errore agy", "Errore Typst")
+            i for i, it in enumerate(self.items) if it["st"] in ("In coda", "Errore agy", "Errore gemini-api", "Errore Typst")
         ]
         if not pending:
             self.toast_cb("Nessuna immagine in coda da elaborare")
             return
 
         model = self.current_model()
+        backend = self.current_backend()
         prompt_text = self.prompt_file.read_text(encoding="utf-8").strip()
         skip_ns = self.chk_skip_non_study.get_active()
-        self._set_busy(True, total=len(pending), label=f"CeTZ ({model})")
+        self._set_busy(True, total=len(pending), label=f"CeTZ ({backend} · {model})")
 
         def worker() -> None:
             for start in range(0, len(pending), self.batch_size):
                 if self._cancel_ev.is_set():
                     break
                 batch_idxs = pending[start : start + self.batch_size]
-                dirs = list({Path(self.items[i]["path"]).parent for i in batch_idxs})
-                with AgyStreamSession(self.agy_bin, model, dirs) as sess:
+                dirs = list({Path(self.items[i]["path"]).parent for i in batch_idxs if self.items[i].get("path")})
+                try:
+                    sess_cm = create_llm_session(self.gen, model=model, add_dirs=dirs, backend=backend)
+                except Exception as exc:
+                    GLib.idle_add(self.toast_cb, str(exc))
+                    break
+                with sess_cm as sess:
                     for i in batch_idxs:
                         if self._cancel_ev.is_set():
                             break
                         it = self.items[i]
                         GLib.idle_add(self._update_item, i, {"status": "Elaborazione…"})
                         res = convert_single_image(
+                            general=self.gen,
                             agy_bin=self.agy_bin,
                             typst_bin=self.typst_bin,
                             model=model,
@@ -622,6 +797,7 @@ class CeTZStudioView(Gtk.Box):
                             out_dir=self.backup_dir,
                             stem=it["stem"],
                             session=sess,
+                            backend=backend,
                             skip_non_study=skip_ns,
                             max_retries=self.max_retries,
                             status_cb=lambda s, idx=i: GLib.idle_add(self._update_item, idx, {"status": s}),
@@ -678,36 +854,44 @@ class CeTZStudioView(Gtk.Box):
 
         self.ent_ai.set_text("")
         model = self.current_model()
+        backend = self.current_backend()
         prompt_text = self.prompt_file.read_text(encoding="utf-8").strip()
         self._set_busy(True, total=1, label=f"Modifica AI · {it['name']}")
         self._update_item(idx, {"status": "Modifica AI…"})
 
         def worker() -> None:
-            if cur_code:
-                res = refine_cetz_code(
-                    agy_bin=self.agy_bin,
-                    typst_bin=self.typst_bin,
-                    model=model,
-                    current_code=cur_code,
-                    instruction=q,
-                    out_dir=self.backup_dir,
-                    stem=it["stem"],
-                    img_path=Path(it["path"]) if it.get("path") else None,
-                    max_retries=self.max_retries,
-                )
-            else:
-                res = convert_single_image(
-                    agy_bin=self.agy_bin,
-                    typst_bin=self.typst_bin,
-                    model=model,
-                    prompt_text=prompt_text,
-                    img_path=Path(it["path"]),
-                    out_dir=self.backup_dir,
-                    stem=it["stem"],
-                    skip_non_study=False,
-                    extra_instruction=q,
-                    max_retries=self.max_retries,
-                )
+            try:
+                if cur_code:
+                    res = refine_cetz_code(
+                        general=self.gen,
+                        agy_bin=self.agy_bin,
+                        typst_bin=self.typst_bin,
+                        model=model,
+                        current_code=cur_code,
+                        instruction=q,
+                        out_dir=self.backup_dir,
+                        stem=it["stem"],
+                        img_path=Path(it["path"]) if it.get("path") else None,
+                        backend=backend,
+                        max_retries=self.max_retries,
+                    )
+                else:
+                    res = convert_single_image(
+                        general=self.gen,
+                        agy_bin=self.agy_bin,
+                        typst_bin=self.typst_bin,
+                        model=model,
+                        prompt_text=prompt_text,
+                        img_path=Path(it["path"]),
+                        out_dir=self.backup_dir,
+                        stem=it["stem"],
+                        backend=backend,
+                        skip_non_study=False,
+                        extra_instruction=q,
+                        max_retries=self.max_retries,
+                    )
+            except Exception as exc:
+                res = {"ok": False, "status": f"Errore {backend}", "code": cur_code, "png": "", "err": str(exc)}
 
             def done() -> None:
                 self._run_done = 1
@@ -738,7 +922,9 @@ class CeTZStudioView(Gtk.Box):
             return
         if not gfile or not gfile.get_path():
             return
-        typ_path = Path(gfile.get_path())
+        self._start_typ_conversion(Path(gfile.get_path()))
+
+    def _start_typ_conversion(self, typ_path: Path) -> None:
         txt, lines, tasks = parse_typ_images(typ_path, self.screenshots_dir)
         if not tasks:
             self.toast_cb(f"Nessuna immagine trovata in {typ_path.name}")
@@ -746,6 +932,7 @@ class CeTZStudioView(Gtk.Box):
 
         auto_mode = self.mode_dd.get_selected() == 1
         model = self.current_model()
+        backend = self.current_backend()
         prompt_text = self.prompt_file.read_text(encoding="utf-8").strip()
         skip_ns = self.chk_skip_non_study.get_active()
         self._set_busy(True, total=len(tasks), label=f"Conversione {typ_path.name}")
@@ -762,19 +949,26 @@ class CeTZStudioView(Gtk.Box):
             GLib.idle_add(upd)
 
         def worker() -> None:
-            results = convert_typ_batches(
-                tasks,
-                agy_bin=self.agy_bin,
-                typst_bin=self.typst_bin,
-                model=model,
-                prompt_text=prompt_text,
-                out_dir=self.backup_dir,
-                batch_size=self.batch_size,
-                skip_non_study=skip_ns,
-                max_retries=self.max_retries,
-                progress_fn=on_prog,
-                cancel_event=self._cancel_ev,
-            )
+            try:
+                results = convert_typ_batches(
+                    tasks,
+                    general=self.gen,
+                    agy_bin=self.agy_bin,
+                    typst_bin=self.typst_bin,
+                    model=model,
+                    prompt_text=prompt_text,
+                    out_dir=self.backup_dir,
+                    backend=backend,
+                    batch_size=self.batch_size,
+                    skip_non_study=skip_ns,
+                    max_retries=self.max_retries,
+                    progress_fn=on_prog,
+                    cancel_event=self._cancel_ev,
+                )
+            except Exception as exc:
+                GLib.idle_add(self._set_busy, False, 0, f"Errore: {exc}")
+                GLib.idle_add(self.toast_cb, str(exc))
+                return
 
             def finish() -> None:
                 if auto_mode and not self._cancel_ev.is_set():

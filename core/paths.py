@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tomllib
 from pathlib import Path
@@ -61,6 +62,20 @@ def resolve_bin(configured: str | None, name: str, extra_candidates: list[Path] 
     return configured or name
 
 
+def load_gemini_api_key(general: dict[str, Any]) -> str | None:
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    key_file_cfg = general.get("gemini_api_key_file", "~/.config/appunti/gemini.key")
+    if key_file_cfg:
+        kf = Path(key_file_cfg).expanduser()
+        if kf.exists():
+            val = kf.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+    return None
+
+
 def load_config(explicit_path: Path | None = None) -> tuple[Path, dict[str, Any]]:
     cfg_path = find_config_path(explicit_path)
     with cfg_path.open("rb") as fh:
@@ -94,6 +109,9 @@ def load_config(explicit_path: Path | None = None) -> tuple[Path, dict[str, Any]
     )
     gen.setdefault("mineru_tier", "basic")
     gen.setdefault("use_mineru_default", True)
+    gen.setdefault("llm_backend", "agy")
+    gen.setdefault("figures_mode", "hybrid")
+    gen.setdefault("gemini_api_key_file", "~/.config/appunti/gemini.key")
     gen.setdefault("default_max_fig_height", "6cm")
     gen.setdefault("audio_chunk_seconds", 600)
     gen.setdefault("audio_overlap_seconds", 8)
@@ -101,3 +119,56 @@ def load_config(explicit_path: Path | None = None) -> tuple[Path, dict[str, Any]
     gen.setdefault("figure_batch_size", 5)
 
     return cfg_path, cfg
+
+
+def append_subject_to_config(
+    cfg_path: Path,
+    *,
+    key: str,
+    name: str,
+    source_dir: str,
+    typst_project_dir: str,
+    layout: str = "subfolders",
+    shared_source_dir: str = "",
+) -> None:
+    """Aggiunge in modo sicuro una nuova sezione [materie.<key>] in config.toml."""
+    safe_key = re.sub(r"[^a-z0-9_]+", "_", key.strip().lower()).strip("_")
+    if not safe_key:
+        raise ValueError("ID materia non valido")
+
+    if layout == "subfolders":
+        chap_pat = r"'^(\d{1,2})\s*-\s*(.+)$'"
+        prefix = re.escape(safe_key)
+        pdf_pat = f"'(?i)^(?:{prefix}\\s*)?(\\d+)[-_](\\d+[a-z]?)(?:\\s+(.*))?\\.pdf$'"
+        txt_pat = f"'(?i)^(?:{prefix}\\s*)?(\\d+)[-_](\\d+[a-z]?)(?:\\s*\\(.*\\))?\\.txt$'"
+        med_pat = f"'(?i)^(?:{prefix}\\s*)?(\\d+)[-_](\\d+[a-z]?)(?:\\s*.*)?\\.(mp4|mkv|webm|mov|avi|mp3|wav|m4a|ogg)$'"
+    else:
+        chap_pat = "''"
+        pdf_pat = r"'(?i)^(?:modulo|cap|lez(?:ione)?)\s*(\d+)(?:[_\s]+(.*))?\.pdf$'"
+        txt_pat = r"'(?i)^(?:modulo|cap|lez(?:ione)?)\s*(\d+)(?:[_\s]+(.*))?\.txt$'"
+        med_pat = r"'(?i)^(?:modulo|cap|lez(?:ione)?)\s*(\d+)(?:[_\s]+.*)?\.(mp4|mkv|webm|mov|avi|mp3|wav|m4a|ogg)$'"
+
+    def esc(val: str) -> str:
+        return val.replace("\\", "\\\\").replace('"', '\\"')
+
+    block = (
+        f"\n[materie.{safe_key}]\n"
+        f'name = "{esc(name.strip())}"\n'
+        f'source_dir = "{esc(source_dir.strip())}"\n'
+        f'chapter_layout = "{layout}"\n'
+        f"chapter_dir_pattern = {chap_pat}\n"
+        f'shared_source_dir = "{esc(shared_source_dir.strip())}"\n'
+        f'typst_project_dir = "{esc(typst_project_dir.strip())}"\n'
+        f'main_file = "main.typ"\n'
+        f'chapters_dir = "."\n'
+        f'figs_dir = "figs"\n'
+        f'max_fig_height = "6cm"\n'
+        f"pdf_pattern = {pdf_pat}\n"
+        f"txt_pattern = {txt_pat}\n"
+        f"media_pattern = {med_pat}\n"
+        f"extra_media_dirs = []\n"
+    )
+    existing = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    cfg_path.write_text(existing + block, encoding="utf-8")

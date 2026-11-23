@@ -9,7 +9,7 @@
   figure(scale(k * 100%, body, reflow: true), caption: caption)
 })
 
-#let img-flag(id, pagina: none, src: none, desc: "", max-h: 6cm, caption: none) = {
+#let img-flag(id, pagina: none, src: none, kind: none, desc: "", max-h: 6cm, caption: none) = {
   let cap = if caption != none { caption } else { none }
   if id in fig-registry {
     let entry = fig-registry.at(id)

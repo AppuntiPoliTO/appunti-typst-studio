@@ -44,6 +44,10 @@ def ensure_helpers(typst_dir: Path, templates_dir: Path, figs_dir_name: str) -> 
     helpers_dst = typst_dir / "fig-helpers.typ"
     if not helpers_dst.exists():
         shutil.copy2(templates_dir / "fig-helpers.typ", helpers_dst)
+    macros_src = templates_dir / "cetz-macros.typ"
+    macros_dst = typst_dir / "cetz-macros.typ"
+    if macros_src.exists() and not macros_dst.exists():
+        shutil.copy2(macros_src, macros_dst)
     figs_dir = typst_dir / figs_dir_name
     figs_dir.mkdir(parents=True, exist_ok=True)
     idx_dst = figs_dir / "_index.typ"

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from core.agy_client import call_llm_oneshot
 from core.paths import TEMPLATES_DIR, load_config
 
 CORE_DIR = REPO_ROOT / "core"
@@ -60,6 +62,10 @@ def ensure_local_project(manifest: dict[str, Any]) -> Path:
             (TEMPLATES_DIR / "fig-helpers.typ").read_text(encoding="utf-8"),
             encoding="utf-8",
         )
+    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
+    macros_dst = typst_dir / "cetz-macros.typ"
+    if macros_src.exists() and not macros_dst.exists():
+        shutil.copy2(macros_src, macros_dst)
     figs_dir = typst_dir / manifest["figs_dir"]
     figs_dir.mkdir(parents=True, exist_ok=True)
     idx_dst = figs_dir / "_index.typ"
@@ -116,6 +122,7 @@ def generate_part_notes(
     part_out: Path,
     is_first: bool,
     mineru_part_dir: Path | None = None,
+    backend: str = "agy",
 ) -> None:
     appunti_prompt = (Path(general["prompts_dir"]) / "appunti.md").read_text(encoding="utf-8")
 
@@ -155,11 +162,12 @@ def generate_part_notes(
         )
         flag_rule = (
             f"4. Segnala ogni figura tecnica importante (ignora loghi universitari o copertine decorative) con:\n"
-            f'   `#img-flag("{materia}-c{cap}-p{pid}-<nn>", pagina: <n>, src: "<filename>", desc: "...")`\n'
-            f"   dove `<filename>` è il nome esatto dall'elenco MinerU qui sopra (es. `page_3_image_11.jpg`) "
-            f"e `<n>` è la sua pagina (1-based)."
+            f'   `#img-flag("{materia}-c{cap}-p{pid}-<nn>", pagina: <n>, src: "<filename>", kind: "diagram"|"photo", desc: "...")`\n'
+            f"   dove `<filename>` è il nome esatto dall'elenco MinerU qui sopra, `<n>` è la pagina (1-based), "
+            f'e `kind` è `"diagram"` per schemi/grafici/vettori vettorializzabili in CeTZ oppure `"photo"` per fotografie reali o disegni costruttivi fotografici molto complessi.'
         )
-        dirs_to_add = (mineru_part_dir, Path(txt_path).parent, Path(manifest["typst_project_dir"]))
+        dirs_to_add = [mineru_part_dir, Path(txt_path).parent, Path(manifest["typst_project_dir"])]
+        attach_files = [md_path, Path(txt_path)]
     else:
         source_block = (
             f"SORGENTI DA LEGGERE (usa read_file):\n"
@@ -168,15 +176,22 @@ def generate_part_notes(
         )
         flag_rule = (
             f"4. Segnala ogni figura importante delle slide con:\n"
-            f'   `#img-flag("{materia}-c{cap}-p{pid}-<nn>", pagina: <n>, desc: "...")`\n'
+            f'   `#img-flag("{materia}-c{cap}-p{pid}-<nn>", pagina: <n>, kind: "diagram"|"photo", desc: "...")`\n'
             f"   (es. `{materia}-c{cap}-p{pid}-01`, `{materia}-c{cap}-p{pid}-02`)."
         )
-        dirs_to_add = (Path(pdf_path).parent, Path(txt_path).parent, Path(manifest["typst_project_dir"]))
+        dirs_to_add = [Path(pdf_path).parent, Path(txt_path).parent, Path(manifest["typst_project_dir"])]
+        attach_files = [Path(pdf_path), Path(txt_path)]
+
+    output_rule = (
+        f"OUTPUT OBBLIGATORIO: scrivi il file `{part_out}`."
+        if backend == "agy"
+        else "OUTPUT OBBLIGATORIO: rispondi ESCLUSIVAMENTE con il contenuto Typst completo del file (in blocco ```typst ... ```)."
+    )
 
     prompt = (
         f"Genera il file Typst per la parte {pid} del capitolo {cap} di {manifest['materia_name']}.\n\n"
         f"{source_block}\n"
-        f"OUTPUT OBBLIGATORIO: scrivi il file `{part_out}`.\n"
+        f"{output_rule}\n"
         f"REGOLE DI STRUTTURA:\n"
         f'1. Prima riga del file: `#import "../../fig-helpers.typ": fig-safe, img-flag`\n'
         f"2. NON inserire `#set page`, `#set text`, `#import \"@preview/cetz:...\"` o `#let nota`.\n"
@@ -186,6 +201,22 @@ def generate_part_notes(
         f"6. Mai usare `#image(...)` diretti: segnala ogni figura tramite `#img-flag(...)`.\n\n"
         f"--- SPECIFICA STILE E BUDGET ---\n{appunti_prompt}"
     )
+
+    if backend == "gemini-api":
+        rc, out, err = call_llm_oneshot(
+            general,
+            model=general["model_notes"],
+            add_dirs=dirs_to_add,
+            prompt=prompt,
+            files=attach_files,
+            backend="gemini-api",
+        )
+        if rc != 0 or not out.strip():
+            raise RuntimeError(f"Generazione appunti (gemini-api) fallita per parte {pid}: {err[:300]}")
+        m = re.search(r"```(?:typst)?\s*\n(.*?)```", out, re.DOTALL)
+        typ_text = (m.group(1).strip() if m else out.strip()) + "\n"
+        part_out.write_text(typ_text, encoding="utf-8")
+        return
 
     add_dirs: list[str] = []
     for d in dirs_to_add:
@@ -355,6 +386,18 @@ def main() -> int:
     parser.add_argument("--mineru", action="store_true", default=None, help="Usa MinerU OCR + ritaglio figure (default)")
     parser.add_argument("--no-mineru", action="store_false", dest="mineru", help="Usa PDF crudo + pdftoppm")
     parser.add_argument("--force-ocr", action="store_true", help="Forza OCR MinerU completo (--ocr-mode ocr)")
+    parser.add_argument(
+        "--figures-mode",
+        choices=("hybrid", "cetz", "mineru"),
+        default=None,
+        help="Modalità figure: hybrid (consigliata), cetz (tutto CeTZ), mineru (solo ritagli)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("agy", "gemini-api"),
+        default=None,
+        help="Backend LLM: agy (default) oppure gemini-api (REST API diretta)",
+    )
     parser.add_argument("--transcribe", action="store_true", help="Avvia trascrizione audio/video senza chiedere")
     parser.add_argument("--force-figures", action="store_true", help="Rigenera anche figure esistenti")
     parser.add_argument("--skip-notes", action="store_true", help="Salta generazione testo e rigenera solo figure")
@@ -365,6 +408,8 @@ def main() -> int:
     cfg_path, cfg = load_config(args.config)
     general = cfg["general"]
     use_mineru = bool(general.get("use_mineru_default", True)) if args.mineru is None else bool(args.mineru)
+    figures_mode = args.figures_mode or general.get("figures_mode", "hybrid")
+    backend = args.backend or general.get("llm_backend", "agy")
 
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not merge_only and not args.no_gui and (args.gui or has_display or args.materia is None or args.capitolo is None):
@@ -381,6 +426,10 @@ def main() -> int:
             gui_cmd.append("--no-mineru")
         if args.force_ocr:
             gui_cmd.append("--force-ocr")
+        if args.figures_mode:
+            gui_cmd.append(f"--figures-mode={args.figures_mode}")
+        if args.backend:
+            gui_cmd.append(f"--backend={args.backend}")
         if args.transcribe:
             gui_cmd.append("--transcribe")
         if args.force_figures:
@@ -515,7 +564,15 @@ def main() -> int:
             emit_progress(phase="notes", status="item_start", done=done_i, total=len(selected_parts), item=item_label)
             print(f"\n==> [3/5 Appunti parte {part['part_id']} · {src_tag}] -> {part_out}", flush=True)
             mineru_part_dir = (mineru_cache_dir / f"p{part['part_id']}") if mineru_cache_dir else None
-            generate_part_notes(general, manifest, part, part_out, is_first=(idx == 0), mineru_part_dir=mineru_part_dir)
+            generate_part_notes(
+                general,
+                manifest,
+                part,
+                part_out,
+                is_first=(idx == 0),
+                mineru_part_dir=mineru_part_dir,
+                backend=backend,
+            )
             sync_chapter_live(typst_dir, manifest, pdf_parts)
             dt = round(time.monotonic() - t0, 2)
             print(f"  ✓ Parte {part['part_id']} generata in {dt:.1f}s (visibile live in LocalTypst)", flush=True)
@@ -532,12 +589,22 @@ def main() -> int:
         for p in selected_parts
         if (parts_dir / f"p{p['part_id']}.typ").exists()
     ]
-    fig_cmd = [sys.executable, str(CORE_DIR / "figures.py"), str(manifest_path), *[str(p) for p in selected_part_files], *cfg_arg]
+    fig_cmd = [
+        sys.executable,
+        str(CORE_DIR / "figures.py"),
+        str(manifest_path),
+        *[str(p) for p in selected_part_files],
+        *cfg_arg,
+        "--figures-mode",
+        figures_mode,
+        "--backend",
+        backend,
+    ]
     if args.force_figures:
         fig_cmd.append("--force")
     if mineru_cache_dir is not None and mineru_cache_dir.exists():
         fig_cmd.extend(["--mineru-dir", str(mineru_cache_dir)])
-    run_step(fig_cmd, "4/5 Figure CeTZ")
+    run_step(fig_cmd, f"4/5 Figure ({figures_mode})")
 
     fig_rep_path = work_dir / f"{materia}_cap{args.capitolo}_figures_report.json"
     fig_report = json.loads(fig_rep_path.read_text(encoding="utf-8")) if fig_rep_path.exists() else {}

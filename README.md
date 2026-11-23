@@ -13,12 +13,13 @@ Suite unificata (CLI + GUI nativa **GTK 4 / Libadwaita**) che fonde:
 ## Funzionalità Principali
 
 - **Interfaccia unificata Libadwaita (`appunti-gui`)**:
-  - **Scheda Appunti**: selezione automatica capitoli, checkbox per singola parte (`Tutte / Pronte / Nessuna`), banner automatico per PDF che richiedono `--force-ocr`, stepper 7 fasi, barra progressi reale + stima **ETA** adattiva, log colorato e apertura diretta in **LocalTypst**.
-  - **Scheda CeTZ Studio**: selezione modello Gemini, coda immagini, convertitore batch di file `.typ` (*Revisione guidata* o *Automatica*), confronto fianco a fianco, codice modificabile + `Rerun` + `Modifica AI`, copia nativa in clipboard.
-- **Ottimizzato per PC con 8 GB RAM**:
-  - Usa **sessioni `agy` riutilizzabili (`stream-json`)** a blocchi da 5 figure (`core/agy_client.py`) invece di avvii a freddo ripetuti o 5 processi paralleli.
-  - **MinerU 4.x ONNX** su CPU con cache intelligente per PDF (0s sui passaggi successivi).
-  - **Live preview su LocalTypst**: aggiorna atomicamente `<capitolo>.typ`, `main.typ` e `figs/_index.typ` dopo ogni parte e dopo ogni singola figura generata.
+  - **Scheda Appunti**: selezione automatica capitoli, wizard **Nuova Materia (`+`)**, Drag & Drop di `.txt`/audio/video, checkbox per singola parte (`Tutte / Pronte / Nessuna`), banner automatico per PDF che richiedono `--force-ocr`, modalità figure (**Ibrida / Tutto CeTZ / Solo ritagli MinerU**), scelta backend (**`agy` CLI / Gemini REST API**), sezione **Figure del capitolo** con ponte diretto **"Modifica in CeTZ Studio"**, stepper 7 fasi, barra progressi reale + stima **ETA**, log colorato e apertura diretta in **LocalTypst**.
+  - **Scheda CeTZ Studio**: scelta backend & modello Gemini, Drag & Drop di immagini o `.typ`, coda immagini, convertitore batch `.typ` (*Revisione guidata* o *Automatica*), confronto fianco a fianco Originale/CeTZ, codice modificabile + `Rerun` + `Modifica AI`, salvataggio diretto live su LocalTypst per le figure di progetto e copia nativa in clipboard.
+- **Libreria macro CeTZ condivise (`templates/cetz-macros.typ`)**: `axes-2d`, `axes-3d`, `dim-line`, `ground-hatch`, `center-line`, `force-vec`, `cyl-3d` automaticamente copiata in ogni progetto Typst.
+- **Dual-Backend LLM (`core/agy_client.py`)**:
+  - **`agy` CLI** (default): sessioni `stream-json` riutilizzabili a blocchi da 5 figure (zero lag su 8 GB RAM).
+  - **`gemini-api`**: client REST API diretto (zero processi locali, ~15 MB RAM, funziona anche senza `agy` installato usando `GEMINI_API_KEY` o `~/.config/appunti/gemini.key`).
+- **MinerU 4.x ONNX** su CPU con cache intelligente per PDF (0s sui passaggi successivi) e **live preview su LocalTypst** con scritture atomiche.
 - **Shortcut Screenshot rapido (`cetz-screenshot`)**: cattura dagli appunti Wayland (`wl-paste`) o da `~/Screenshots`, converte in CeTZ via sessione isolata `stream-json`, copia in clipboard e apre anteprima rapida con modifica AI.
 
 ---

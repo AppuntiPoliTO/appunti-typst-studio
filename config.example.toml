@@ -18,17 +18,25 @@ pdftoppm_bin = ""
 git_bin = ""
 mineru_bin = ""
 
-# Backend MinerU 4.x ONNX
+# Backend MinerU 4.x ONNX e modalità figure
 mineru_tier = "basic"
 use_mineru_default = true
+# Modalità figure: "hybrid" (CeTZ per schemi/grafici, ritaglio MinerU per foto/sezioni complesse),
+# "cetz" (rigenera tutto in CeTZ), oppure "mineru" (ultra-veloce: solo ritagli MinerU)
+figures_mode = "hybrid"
 
-# Modelli Gemini (via agy CLI + Gemini API per trascrizione audio)
+# Backend LLM: "agy" (abbonamento Antigravity CLI) oppure "gemini-api" (REST API diretta con GEMINI_API_KEY)
+llm_backend = "agy"
+
+# Modelli Gemini (via agy CLI + Gemini REST API)
 model_notes = "gemini-4-hydrogen-medium"
 model_figures = "gemini-4-hydrogen-medium"
 model_cetz_studio = "gemini-4-hydrogen-high"
 model_cetz_screenshot = "gemini-4-hydrogen-medium"
 model_transcribe = "gemini-4-hydrogen-medium"
 gemini_transcribe_model = "gemini-3.5-transcribe"
+gemini_api_model = "gemini-2.5-pro"
+gemini_api_fast_model = "gemini-2.5-flash"
 gemini_api_key_file = "~/.config/appunti/gemini.key"
 
 # Parametri grafici e trascrizione

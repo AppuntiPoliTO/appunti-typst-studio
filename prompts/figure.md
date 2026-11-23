@@ -12,6 +12,7 @@ PREAMBOLO: Nessuna modifica al preambolo
 ```
 
 Il preambolo contiene già #import "@preview/cetz:0.3.4": canvas, draw. Se serve davvero altro, scrivi "DA AGGIUNGERE AL PREAMBOLO:" con le righe esatte e il motivo.
+Nota opzionale (macro condivise): nel progetto è disponibile anche `#import "../cetz-macros.typ": axes-2d, axes-3d, dim-line, ground-hatch, center-line, force-vec, cyl-3d` (usale solo se semplificano il disegno mantenendo precisione geometrica totale; altrimenti usa le primitive pure qui sotto).
 Esegui tutta l'analisi geometrica, i calcoli e le verifiche internamente prima di rispondere: NON scrivere fasi, spiegazioni o calcoli nei commenti dell'output. Nell'output deve comparire esclusivamente il codice Typst pulito.
 
 OBIETTIVO DI MIGLIORAMENTO (geometria, 3D e tratto)

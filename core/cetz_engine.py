@@ -9,13 +9,15 @@ Risolve i vecchi problemi di CeTZ Studio:
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .agy_client import AgyStreamSession, call_agy_oneshot
+from .agy_client import AgyStreamSession, GeminiApiSession, call_llm_oneshot, create_llm_session
+from .paths import TEMPLATES_DIR
 
 IMAGE_CALL_RX = re.compile(r'(#?)image\(\s*"([^"]+)"[^)]*\)')
 
@@ -24,7 +26,7 @@ def extract_cetz_code(raw: str, include_import: bool = False) -> str:
     m = re.search(r"```(?:typst)?\s*\n(.*?)```", raw, re.DOTALL)
     code = m.group(1).strip() if m else raw.strip()
     code = re.sub(r"\\?var(epsilon|phi)\b", r"\1", code)
-    if include_import and "@preview/cetz:" not in code:
+    if include_import and "@preview/cetz:" not in code and "cetz-macros.typ" not in code:
         code = '#import "@preview/cetz:0.3.4": canvas, draw\n' + code
     return code
 
@@ -37,14 +39,20 @@ def render_cetz_png(
     ppi: int = 180,
 ) -> tuple[bool, Path, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    tp = out_dir / f"{stem}.typ"
+    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
+    if macros_src.exists() and not (out_dir / "cetz-macros.typ").exists():
+        shutil.copy2(macros_src, out_dir / "cetz-macros.typ")
+    # Supporta anche #import "../cetz-macros.typ" quando il file risiede in figs/
+    figs_sub = out_dir / "figs"
+    figs_sub.mkdir(exist_ok=True)
+    tp = figs_sub / f"{stem}.typ"
     pp = out_dir / f"{stem}.png"
     header = '#set page(width: auto, height: auto, margin: 0.4cm)\n'
-    if "@preview/cetz:" not in code:
+    if "@preview/cetz:" not in code and "cetz-macros.typ" not in code:
         header += '#import "@preview/cetz:0.3.4": canvas, draw\n'
     tp.write_text(header + code + "\n", encoding="utf-8")
     res = subprocess.run(
-        [typst_bin, "compile", "--format", "png", "--ppi", str(ppi), str(tp), str(pp)],
+        [typst_bin, "compile", "--root", str(out_dir), "--format", "png", "--ppi", str(ppi), str(tp), str(pp)],
         capture_output=True,
         text=True,
     )
@@ -90,6 +98,7 @@ def build_fix_prompt(prev_code: str, error_msg: str, in_same_session: bool) -> s
 
 def convert_single_image(
     *,
+    general: dict[str, Any] | None = None,
     agy_bin: str,
     typst_bin: str,
     model: str,
@@ -97,7 +106,8 @@ def convert_single_image(
     img_path: Path,
     out_dir: Path,
     stem: str,
-    session: AgyStreamSession | None = None,
+    session: AgyStreamSession | GeminiApiSession | None = None,
+    backend: str = "agy",
     skip_non_study: bool = False,
     extra_instruction: str = "",
     max_retries: int = 2,
@@ -105,6 +115,8 @@ def convert_single_image(
 ) -> dict[str, Any]:
     t0 = time.monotonic()
     img_dir = img_path.parent
+    gen = dict(general or {})
+    gen.setdefault("agy_bin", agy_bin)
     use_stream = session is not None
     first_in_sess = (session.turns == 0) if session is not None else True
 
@@ -116,7 +128,7 @@ def convert_single_image(
         extra_instruction=extra_instruction,
     )
     if session is not None:
-        rc, out, err = session.send(pr)
+        rc, out, err = session.send(pr, files=[img_path])
         if rc != 0:
             use_stream = False
             full_pr = build_cetz_prompt(
@@ -126,14 +138,14 @@ def convert_single_image(
                 skip_non_study=skip_non_study,
                 extra_instruction=extra_instruction,
             )
-            rc, out, err = call_agy_oneshot(agy_bin, model, img_dir, full_pr)
+            rc, out, err = call_llm_oneshot(gen, model=model, add_dirs=img_dir, prompt=full_pr, files=[img_path], backend=backend)
     else:
-        rc, out, err = call_agy_oneshot(agy_bin, model, img_dir, pr)
+        rc, out, err = call_llm_oneshot(gen, model=model, add_dirs=img_dir, prompt=pr, files=[img_path], backend=backend)
 
     if rc != 0:
         return {
             "ok": False,
-            "status": "Errore agy",
+            "status": f"Errore {backend}",
             "code": "",
             "png": "",
             "err": err.strip(),
@@ -164,11 +176,18 @@ def convert_single_image(
             rc, out, err = session.send(fix_pr)
             if rc != 0:
                 use_stream = False
-                rc, out, err = call_agy_oneshot(
-                    agy_bin, model, img_dir, build_fix_prompt(code, comp_err, in_same_session=False)
+                rc, out, err = call_llm_oneshot(
+                    gen,
+                    model=model,
+                    add_dirs=img_dir,
+                    prompt=build_fix_prompt(code, comp_err, in_same_session=False),
+                    files=[img_path],
+                    backend=backend,
                 )
         else:
-            rc, out, err = call_agy_oneshot(agy_bin, model, img_dir, fix_pr)
+            rc, out, err = call_llm_oneshot(
+                gen, model=model, add_dirs=img_dir, prompt=fix_pr, files=[img_path], backend=backend
+            )
         if rc != 0 or not out.strip():
             break
         code = extract_cetz_code(out)
@@ -186,6 +205,7 @@ def convert_single_image(
 
 def refine_cetz_code(
     *,
+    general: dict[str, Any] | None = None,
     agy_bin: str,
     typst_bin: str,
     model: str,
@@ -194,13 +214,18 @@ def refine_cetz_code(
     out_dir: Path,
     stem: str,
     img_path: Path | None = None,
+    backend: str = "agy",
     max_retries: int = 2,
 ) -> dict[str, Any]:
     t0 = time.monotonic()
+    gen = dict(general or {})
+    gen.setdefault("agy_bin", agy_bin)
     add_dirs: list[Path] = []
+    files: list[Path] = []
     ref_line = ""
     if img_path and img_path.exists():
         add_dirs.append(img_path.parent)
+        files.append(img_path)
         ref_line = f"Immagine originale di riferimento (se utile, usa read_file): {img_path}\n"
 
     pr = (
@@ -209,12 +234,12 @@ def refine_cetz_code(
         f"Modifica richiesta: {instruction}\n"
         "Rispondi SOLO con il blocco ```typst aggiornato (senza #import/#set/#let/for/calc dentro il canvas)."
     )
-    with AgyStreamSession(agy_bin, model, add_dirs) as sess:
-        rc, out, err = sess.send(pr)
+    with create_llm_session(gen, model=model, add_dirs=add_dirs, backend=backend) as sess:
+        rc, out, err = sess.send(pr, files=files)
         if rc != 0:
             return {
                 "ok": False,
-                "status": "Errore agy",
+                "status": f"Errore {backend}",
                 "code": current_code,
                 "png": "",
                 "err": err.strip(),
@@ -263,28 +288,32 @@ def parse_typ_images(typ_path: Path, screenshots_dir: Path) -> tuple[str, list[s
 def convert_typ_batches(
     tasks: list[tuple[int, int, int, str, Path]],
     *,
+    general: dict[str, Any] | None = None,
     agy_bin: str,
     typst_bin: str,
     model: str,
     prompt_text: str,
     out_dir: Path,
+    backend: str = "agy",
     batch_size: int = 5,
     skip_non_study: bool = True,
     max_retries: int = 2,
     progress_fn: Callable[[int, int, str, float | None], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
-    """Converte le immagini trovate in un .typ usando sessioni agy a blocchi (leggero su RAM)."""
+    """Converte le immagini trovate in un .typ usando sessioni riutilizzabili a blocchi (agy o gemini-api)."""
     results: list[dict[str, Any]] = []
     total = len(tasks)
     batch_size = max(1, batch_size)
+    gen = dict(general or {})
+    gen.setdefault("agy_bin", agy_bin)
 
     for start in range(0, total, batch_size):
         if cancel_event and cancel_event.is_set():
             break
         batch = tasks[start : start + batch_size]
         dirs = list({t[4].parent for t in batch})
-        with AgyStreamSession(agy_bin, model, dirs) as sess:
+        with create_llm_session(gen, model=model, add_dirs=dirs, backend=backend) as sess:
             for t in batch:
                 if cancel_event and cancel_event.is_set():
                     break
@@ -293,6 +322,7 @@ def convert_typ_batches(
                 if progress_fn:
                     progress_fn(len(results), total, img_path.name, None)
                 res = convert_single_image(
+                    general=gen,
                     agy_bin=agy_bin,
                     typst_bin=typst_bin,
                     model=model,
@@ -301,6 +331,7 @@ def convert_typ_batches(
                     out_dir=out_dir,
                     stem=stem,
                     session=sess,
+                    backend=backend,
                     skip_non_study=skip_non_study,
                     max_retries=max_retries,
                 )

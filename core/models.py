@@ -20,7 +20,15 @@ AGY_GEMINI_MODELS: list[tuple[str, str]] = [
     ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low) — Ultra veloce"),
 ]
 
+# Modelli selezionabili via Gemini REST API diretta (usando GEMINI_API_KEY / gemini.key)
+GEMINI_API_MODELS: list[tuple[str, str]] = [
+    ("gemini-2.5-pro", "Gemini 2.5 Pro — Alta qualità (REST API)"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash — Veloce e bilanciato (REST API)"),
+    ("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite — Ultra veloce (REST API)"),
+]
+
 AGY_MODEL_IDS: list[str] = [m[0] for m in AGY_GEMINI_MODELS]
+GEMINI_API_MODEL_IDS: list[str] = [m[0] for m in GEMINI_API_MODELS]
 
 DEFAULT_MODELS: dict[str, str] = {
     "model_notes": "gemini-4-hydrogen-medium",
@@ -29,4 +37,15 @@ DEFAULT_MODELS: dict[str, str] = {
     "model_cetz_screenshot": "gemini-4-hydrogen-medium",
     "model_transcribe": "gemini-4-hydrogen-medium",
     "gemini_transcribe_model": "gemini-3.5-transcribe",
+    "gemini_api_model": "gemini-2.5-pro",
+    "gemini_api_fast_model": "gemini-2.5-flash",
 }
+
+
+def resolve_api_model(requested: str, fallback: str = "gemini-2.5-pro") -> str:
+    """Se il modello richiesto è un ID solo-agy, mappa al modello REST API configurato."""
+    if requested in GEMINI_API_MODEL_IDS or requested.startswith(("gemini-2.", "gemini-1.", "gemini-3.5")):
+        return requested
+    if "flash" in requested.lower() or "low" in requested.lower():
+        return "gemini-2.5-flash"
+    return fallback

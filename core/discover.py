@@ -120,11 +120,77 @@ def part_sort_key(part_id: str) -> tuple[int, str]:
 def slugify_title(title: str, chapter_num: int) -> str:
     if not title:
         return f"cap{chapter_num}"
-    # Rimuove eventuali parentesi es. "Viti e bulloni (Collegamenti filettati)" -> "viti e bulloni"
     clean = re.sub(r"\s*\([^)]*\)", "", title).strip().lower()
     clean = re.sub(r"[/\\:*?\"<>|]+", " ", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean or f"cap{chapter_num}"
+
+
+INCLUDE_FILE_RX = re.compile(r'^\s*#include\s+"([^"]+\.typ)"\s*$', re.MULTILINE)
+EXCLUDED_TYP_FILES = {"main.typ", "fig-helpers.typ", "cetz-macros.typ", "_index.typ"}
+
+
+def list_project_chapter_files(typst_dir: Path, main_file: str) -> list[str]:
+    if not typst_dir.exists():
+        return []
+    ordered: list[str] = []
+    main_path = typst_dir / main_file
+    if main_path.exists():
+        try:
+            for m in INCLUDE_FILE_RX.finditer(main_path.read_text(encoding="utf-8")):
+                fn = m.group(1).strip()
+                if fn not in ordered and (typst_dir / fn).exists():
+                    ordered.append(fn)
+        except Exception:
+            pass
+    for p in sorted(typst_dir.glob("*.typ")):
+        if p.name in EXCLUDED_TYP_FILES or p.name == main_file:
+            continue
+        if p.name not in ordered:
+            ordered.append(p.name)
+    return ordered
+
+
+def match_existing_chapter_file(
+    typst_dir: Path,
+    main_file: str,
+    title: str,
+    chapter_num: int,
+    default_slug: str,
+) -> str | None:
+    """Trova se nel progetto esiste già un .typ corrispondente a questo capitolo (es. 'collegamenti saldati.typ')."""
+    files = list_project_chapter_files(typst_dir, main_file)
+    if not files:
+        return None
+    by_lower = {Path(f).stem.lower(): f for f in files}
+
+    # 1. Match esatto sul testo tra parentesi es. "Saldature (Collegamenti saldati)" -> "collegamenti saldati.typ"
+    for paren in re.findall(r"\(([^)]+)\)", title or ""):
+        cand = re.sub(r"\s+", " ", paren.strip().lower())
+        if cand in by_lower:
+            return by_lower[cand]
+
+    # 2. Match esatto sullo slug predefinito (ma preferisci il file con più contenuto se esiste anche un match parentesi)
+    if default_slug.lower() in by_lower:
+        return by_lower[default_slug.lower()]
+
+    # 3. Match per parole significative nel titolo (es. "Fatica nei materiali" -> "fatica.typ")
+    stop = {"di", "dei", "del", "della", "delle", "nei", "nel", "nella", "fra", "tra", "e", "con", "per", "a", "da"}
+    title_words = {
+        w for w in re.findall(r"[a-zàèéìòù0-9]+", (title or "").lower()) if len(w) >= 4 and w not in stop
+    }
+    best_file: str | None = None
+    best_score = 0
+    for stem_l, fname in by_lower.items():
+        stem_words = {w for w in re.findall(r"[a-zàèéìòù0-9]+", stem_l) if len(w) >= 4 and w not in stop}
+        overlap = len(title_words & stem_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_file = fname
+    if best_file and best_score >= 1:
+        return best_file
+
+    return None
 
 
 def is_git_repo(path: Path, git_bin: str) -> bool:
@@ -310,12 +376,22 @@ def build_manifest(config_path: Path | None, materia: str, chapter_num: int) -> 
         "parts_without_pdf": [p["part_id"] for p in parts if not p["pdf"]],
     }
 
+    default_slug = slugify_title(title, chapter_num)
+    matched_file = match_existing_chapter_file(
+        typst_dir, cfg_mat["main_file"], title, chapter_num, default_slug
+    )
+    effective_slug = Path(matched_file).stem if matched_file else default_slug
+    project_files = list_project_chapter_files(typst_dir, cfg_mat["main_file"])
+
     return {
         "materia": materia,
         "materia_name": cfg_mat["name"],
         "capitolo": chapter_num,
         "chapter_title": title,
-        "chapter_slug": slugify_title(title, chapter_num),
+        "chapter_slug": effective_slug,
+        "default_slug": default_slug,
+        "matched_existing_file": matched_file,
+        "project_chapter_files": project_files,
         "source_dir": str(Path(cfg_mat["source_dir"]).expanduser()),
         "chapter_dir": str(chapter_dir) if chapter_dir else None,
         "shared_source_dir": str(Path(cfg_mat["shared_source_dir"]).expanduser()) if cfg_mat.get("shared_source_dir") else "",

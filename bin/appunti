@@ -82,7 +82,7 @@ def sync_chapter_live(
     manifest: dict[str, Any],
     pdf_parts: list[dict[str, Any]],
 ) -> list[Path]:
-    """Aggiorna atomicamente <slug>.typ e main.typ così il capitolo è visibile subito in LocalTypst."""
+    """Aggiorna atomicamente <slug>.typ e main.typ senza MAI sovrascrivere prosa già esistente."""
     slug = manifest["chapter_slug"]
     parts_dir = typst_dir / "_parts" / slug
     cap_file = typst_dir / f"{slug}.typ"
@@ -94,9 +94,34 @@ def sync_chapter_live(
     ]
     if existing_part_files:
         include_lines = [f'#include "_parts/{slug}/{pf.name}"' for pf in existing_part_files]
-        tmp_cap = cap_file.with_suffix(".typ.tmp")
-        tmp_cap.write_text("\n".join(include_lines) + "\n", encoding="utf-8")
-        tmp_cap.replace(cap_file)
+
+        # Protezione: se cap_file esiste già e contiene prosa reale (non solo #include "_parts/..."),
+        # NON sovrascriverlo mai — accoda solo gli #include mancanti in fondo!
+        has_real_prose = False
+        existing_cap_txt = ""
+        if cap_file.exists():
+            existing_cap_txt = cap_file.read_text(encoding="utf-8")
+            for ln in existing_cap_txt.splitlines():
+                s = ln.strip()
+                if s and not re.match(r'^#include\s+"_parts/[^"]+"$', s):
+                    has_real_prose = True
+                    break
+
+        if has_real_prose:
+            missing_incs = [inc for inc in include_lines if inc not in existing_cap_txt]
+            if missing_incs:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                bak_dir = typst_dir / "_backup_appunti"
+                bak_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cap_file, bak_dir / f"{cap_file.name}.{ts}.preappend.bak")
+                new_cap_txt = existing_cap_txt.rstrip() + "\n\n" + "\n".join(missing_incs) + "\n"
+                tmp_cap = cap_file.with_suffix(".typ.tmp")
+                tmp_cap.write_text(new_cap_txt, encoding="utf-8")
+                tmp_cap.replace(cap_file)
+        else:
+            tmp_cap = cap_file.with_suffix(".typ.tmp")
+            tmp_cap.write_text("\n".join(include_lines) + "\n", encoding="utf-8")
+            tmp_cap.replace(cap_file)
 
         main_path = typst_dir / manifest["main_file"]
         inc = f'#include "{slug}.typ"'
@@ -402,6 +427,10 @@ def main() -> int:
     parser.add_argument("--force-figures", action="store_true", help="Rigenera anche figure esistenti")
     parser.add_argument("--skip-notes", action="store_true", help="Salta generazione testo e rigenera solo figure")
     parser.add_argument("--merge", action="store_true", help="Unisce le parti in un unico <capitolo>.typ alla fine")
+    parser.add_argument("--target", default="", help="(Per merge) File .typ di destinazione nel progetto")
+    parser.add_argument("--source", default="", help="(Per merge) File .typ sorgente separato da accodare")
+    parser.add_argument("--strip-h1", action="store_true", help="(Per merge) Rimuove titolo '=' duplicato")
+    parser.add_argument("--keep-parts", action="store_true", help="(Per merge) Non eliminare sorgente/parti dopo l'unione")
     args = parser.parse_args(argv)
     requested_parts = parse_part_filters(args.part)
 
@@ -454,7 +483,16 @@ def main() -> int:
                 [sys.executable, str(CORE_DIR / "discover.py"), materia, str(args.capitolo), *cfg_arg, "--out", str(manifest_path)],
                 "Discovery",
             )
-        run_step([sys.executable, str(CORE_DIR / "merge_chapter.py"), str(manifest_path), *cfg_arg], "Merge parti")
+        m_cmd = [sys.executable, str(CORE_DIR / "merge_chapter.py"), str(manifest_path), *cfg_arg]
+        if args.target:
+            m_cmd.extend(["--target", args.target])
+        if args.source:
+            m_cmd.extend(["--source", args.source])
+        if args.strip_h1:
+            m_cmd.append("--strip-h1")
+        if args.keep_parts:
+            m_cmd.append("--keep-parts")
+        run_step(m_cmd, "Merge / Accoda nel capitolo")
         emit_progress(phase="merge", status="done")
         return 0
 

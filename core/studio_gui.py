@@ -1875,9 +1875,14 @@ class AppuntiWindow(Adw.ApplicationWindow):
                 self.activity_label.set_text("Seleziona almeno una parte da generare")
 
         slug = m.get("chapter_slug", f"cap{m['capitolo']}")
-        parts_dir = Path(m["typst_project_dir"]) / "_parts" / slug
-        has_parts = parts_dir.exists() and any(parts_dir.glob("p*.typ"))
-        self.merge_btn.set_sensitive((not running) and has_parts)
+        def_slug = m.get("default_slug", slug)
+        typst_dir = Path(m["typst_project_dir"])
+        has_parts = any(
+            (typst_dir / "_parts" / s).exists() and any((typst_dir / "_parts" / s).glob("p*.typ"))
+            for s in {slug, def_slug}
+        )
+        proj_files = m.get("project_chapter_files") or []
+        self.merge_btn.set_sensitive((not running) and (has_parts or len(proj_files) >= 2))
 
         # Aggiorna il banner automatico OCR sulle parti selezionate
         ocr_alerts: list[str] = []
@@ -2272,17 +2277,132 @@ class AppuntiWindow(Adw.ApplicationWindow):
     def on_merge_clicked(self, *_: Any) -> None:
         mat = self.current_materia()
         cap = self.current_chapter_num()
-        if cap is None:
+        m = self.current_manifest
+        if cap is None or not m:
             return
-        self.tracker.start_run(
-            n_parts=0,
-            will_transcribe=False,
-            skip_notes=True,
-            will_check=False,
-            will_merge=True,
-            merge_only=True,
+
+        typst_dir = Path(m["typst_project_dir"])
+        slug = m.get("chapter_slug", f"cap{cap}")
+        def_slug = m.get("default_slug", slug)
+        proj_files: list[str] = list(m.get("project_chapter_files") or [])
+
+        # Raccogli le sorgenti unibili: eventuali _parts/<slug>/ + file .typ nel progetto
+        sources: list[tuple[str, str]] = []  # (id_val, label)  id_val="" -> usa _parts/<slug>/
+        parts_dir = typst_dir / "_parts" / slug
+        if parts_dir.exists() and any(parts_dir.glob("p*.typ")):
+            n_p = len(list(parts_dir.glob("p*.typ")))
+            sources.append(("", f"Parti generate in _parts/{slug}/ ({n_p} file)"))
+        for pf in proj_files:
+            sources.append((pf, f"File esistente: {pf}"))
+
+        if not sources:
+            self.show_toast("Nessuna parte o file .typ da unire")
+            return
+
+        targets: list[str] = list(proj_files)
+        slug_typ = f"{slug}.typ"
+        if slug_typ not in targets:
+            targets.append(slug_typ)
+
+        dlg = Adw.Dialog(title="Unisci / Accoda nel capitolo", content_width=520, content_height=410)
+        tv = Adw.ToolbarView()
+        dlg.set_child(tv)
+
+        hdr = Adw.HeaderBar()
+        btn_go = Gtk.Button(label="Unisci e compila")
+        btn_go.add_css_class("suggested-action")
+        hdr.pack_end(btn_go)
+        tv.add_top_bar(hdr)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(14)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        tv.set_content(box)
+
+        grp = Adw.PreferencesGroup(
+            title="Scegli cosa unire e dove accodarlo",
+            description="La prosa già presente nel file di destinazione viene preservata (con backup automatico .bak)",
         )
-        self.run_bg([str(APPUNTI_BIN), "merge", mat, str(cap), "--config", str(self.config_path)])
+        box.append(grp)
+
+        row_src = Adw.ComboRow(
+            title="Sorgente da unire",
+            model=Gtk.StringList.new([lbl for _, lbl in sources]),
+        )
+        # Pre-seleziona: _parts se presenti, altrimenti <default_slug>.typ (es. saldature.typ) se diverso da <slug>.typ
+        default_src_idx = 0
+        def_typ = f"{def_slug}.typ"
+        if sources[0][0] != "" and def_typ != slug_typ:
+            for idx, (val, _) in enumerate(sources):
+                if val == def_typ:
+                    default_src_idx = idx
+                    break
+        row_src.set_selected(default_src_idx)
+        grp.add(row_src)
+
+        row_dst = Adw.ComboRow(
+            title="File di destinazione",
+            subtitle="Il testo verrà accodato in fondo senza sovrascrivere le parti già scritte",
+            model=Gtk.StringList.new(targets),
+        )
+        if slug_typ in targets:
+            row_dst.set_selected(targets.index(slug_typ))
+        grp.add(row_dst)
+
+        sw_strip_h1 = Adw.SwitchRow(
+            title="Evita titolo capitolo (=) duplicato",
+            subtitle="Rimuove l'eventuale titolo '=' iniziale se la destinazione ne ha già uno",
+        )
+        sw_strip_h1.set_active(True)
+        grp.add(sw_strip_h1)
+
+        sw_cleanup = Adw.SwitchRow(
+            title="Rimuovi sorgente temporaneo dopo l'unione",
+            subtitle="Pulisce _parts/ o il file sorgente e aggiorna main.typ (backup .bak salvato)",
+        )
+        sw_cleanup.set_active(True)
+        grp.add(sw_cleanup)
+
+        def do_merge(*_: Any) -> None:
+            s_idx = row_src.get_selected()
+            d_idx = row_dst.get_selected()
+            src_val = sources[s_idx][0] if s_idx < len(sources) else ""
+            dst_val = targets[d_idx] if d_idx < len(targets) else slug_typ
+            if src_val and src_val == dst_val:
+                self.show_toast("Sorgente e destinazione non possono essere lo stesso file")
+                return
+            dlg.close()
+            cmd = [
+                str(APPUNTI_BIN),
+                "merge",
+                mat,
+                str(cap),
+                "--config",
+                str(self.config_path),
+                "--target",
+                dst_val,
+            ]
+            if src_val:
+                cmd.extend(["--source", src_val])
+            if sw_strip_h1.get_active():
+                cmd.append("--strip-h1")
+            if not sw_cleanup.get_active():
+                cmd.append("--keep-parts")
+
+            self.tracker.start_run(
+                n_parts=0,
+                will_transcribe=False,
+                skip_notes=True,
+                will_check=False,
+                will_merge=True,
+                merge_only=True,
+            )
+            self.run_bg(cmd)
+
+        btn_go.connect("clicked", do_merge)
+        dlg.present(self)
 
     def on_stop_clicked(self, *_: Any) -> None:
         if self.proc:

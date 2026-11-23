@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""Entrypoint CLI unificato: Appunti Typst Studio.
+
+Comandi:
+  appunti <materia> <capitolo> [opzioni]   Genera un capitolo Typst in copia locale
+  appunti merge <materia> <capitolo>       Unisce _parts/<slug>/p*.typ in <slug>.typ
+  appunti cetz                             Apre direttamente la scheda CeTZ Studio nella GUI
+  appunti                                  Apre l'interfaccia grafica unificata
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from core.paths import TEMPLATES_DIR, load_config
+
+CORE_DIR = REPO_ROOT / "core"
+
+
+def emit_progress(**payload: Any) -> None:
+    print(f"@@PROGRESS {json.dumps(payload, ensure_ascii=False)}", flush=True)
+
+
+def run_step(cmd: list[str], label: str) -> None:
+    print(f"\n==> [{label}]", flush=True)
+    res = subprocess.run(cmd, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"Step '{label}' fallito (exit={res.returncode})")
+
+
+def ensure_local_project(manifest: dict[str, Any]) -> Path:
+    typst_dir = Path(manifest["typst_project_dir"])
+    if not typst_dir.exists():
+        shared = manifest.get("shared_source_dir", "")
+        if shared and Path(shared).expanduser().exists():
+            src = Path(shared).expanduser()
+            print(f"\n==> [Copia locale] {src} -> {typst_dir}", flush=True)
+            shutil.copytree(
+                src,
+                typst_dir,
+                ignore=shutil.ignore_patterns("_recupero", ".localtypst*", ".preview-*"),
+            )
+        else:
+            typst_dir.mkdir(parents=True, exist_ok=True)
+
+    helpers_dst = typst_dir / "fig-helpers.typ"
+    if not helpers_dst.exists():
+        helpers_dst.write_text(
+            (TEMPLATES_DIR / "fig-helpers.typ").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    figs_dir = typst_dir / manifest["figs_dir"]
+    figs_dir.mkdir(parents=True, exist_ok=True)
+    idx_dst = figs_dir / "_index.typ"
+    if not idx_dst.exists():
+        idx_dst.write_text(
+            (TEMPLATES_DIR / "figs_index.typ").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    return typst_dir
+
+
+def sync_chapter_live(
+    typst_dir: Path,
+    manifest: dict[str, Any],
+    pdf_parts: list[dict[str, Any]],
+) -> list[Path]:
+    """Aggiorna atomicamente <slug>.typ e main.typ così il capitolo è visibile subito in LocalTypst."""
+    slug = manifest["chapter_slug"]
+    parts_dir = typst_dir / "_parts" / slug
+    cap_file = typst_dir / f"{slug}.typ"
+
+    existing_part_files = [
+        parts_dir / f"p{p['part_id']}.typ"
+        for p in pdf_parts
+        if (parts_dir / f"p{p['part_id']}.typ").exists()
+    ]
+    if existing_part_files:
+        include_lines = [f'#include "_parts/{slug}/{pf.name}"' for pf in existing_part_files]
+        tmp_cap = cap_file.with_suffix(".typ.tmp")
+        tmp_cap.write_text("\n".join(include_lines) + "\n", encoding="utf-8")
+        tmp_cap.replace(cap_file)
+
+        main_path = typst_dir / manifest["main_file"]
+        inc = f'#include "{slug}.typ"'
+        if main_path.exists():
+            content = main_path.read_text(encoding="utf-8")
+            if inc not in content:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                bak_dir = typst_dir / "_backup_appunti"
+                bak_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(main_path, bak_dir / f"{main_path.name}.{ts}.prelive.bak")
+                if content and not content.endswith("\n"):
+                    content += "\n"
+                tmp_main = main_path.with_suffix(".typ.tmp")
+                tmp_main.write_text(content + inc + "\n", encoding="utf-8")
+                tmp_main.replace(main_path)
+    return existing_part_files
+
+
+def generate_part_notes(
+    general: dict[str, Any],
+    manifest: dict[str, Any],
+    part: dict[str, Any],
+    part_out: Path,
+    is_first: bool,
+    mineru_part_dir: Path | None = None,
+) -> None:
+    appunti_prompt = (Path(general["prompts_dir"]) / "appunti.md").read_text(encoding="utf-8")
+
+    materia = manifest["materia"]
+    cap = manifest["capitolo"]
+    pid = part["part_id"]
+    pdf_path = part["pdf"]
+    txt_path = part.get("txt")
+    if not txt_path:
+        raise RuntimeError(f"Blocco sicurezza: la parte {pid} non ha .txt (conversione vietata).")
+
+    heading_rule = (
+        f"Questa è la prima parte: inizia con `= {manifest['chapter_title']}`."
+        if is_first and manifest.get("chapter_title")
+        else "Non inserire il titolo di livello `=` (già presente nella parte 1); usa `==` e `===`."
+    )
+
+    use_ocr = (
+        mineru_part_dir is not None
+        and (mineru_part_dir / "markdown.md").exists()
+        and (mineru_part_dir / "index.json").exists()
+    )
+
+    if use_ocr:
+        assert mineru_part_dir is not None
+        md_path = mineru_part_dir / "markdown.md"
+        idx_data = json.loads((mineru_part_dir / "index.json").read_text(encoding="utf-8"))
+        img_lines = "\n".join(
+            f"  - `{im['filename']}` (pag. {im['page']})" for im in idx_data.get("images", [])
+        ) or "  (nessuna immagine estratta)"
+        source_block = (
+            f"SORGENTI DA LEGGERE (usa read_file — NON aprire il PDF crudo):\n"
+            f"- Slide OCR + formule (MinerU Markdown): {md_path}\n"
+            f"- Trascrizione (.txt): {txt_path}\n\n"
+            f"IMMAGINI GIÀ RITAGLIATE DA MINERU (riferite nel Markdown come `![](images/<file>)`):\n"
+            f"{img_lines}\n"
+        )
+        flag_rule = (
+            f"4. Segnala ogni figura tecnica importante (ignora loghi universitari o copertine decorative) con:\n"
+            f'   `#img-flag("{materia}-c{cap}-p{pid}-<nn>", pagina: <n>, src: "<filename>", desc: "...")`\n'
+            f"   dove `<filename>` è il nome esatto dall'elenco MinerU qui sopra (es. `page_3_image_11.jpg`) "
+            f"e `<n>` è la sua pagina (1-based)."
+        )
+        dirs_to_add = (mineru_part_dir, Path(txt_path).parent, Path(manifest["typst_project_dir"]))
+    else:
+        source_block = (
+            f"SORGENTI DA LEGGERE (usa read_file):\n"
+            f"- Slide PDF: {pdf_path}\n"
+            f"- Trascrizione (.txt): {txt_path}\n"
+        )
+        flag_rule = (
+            f"4. Segnala ogni figura importante delle slide con:\n"
+            f'   `#img-flag("{materia}-c{cap}-p{pid}-<nn>", pagina: <n>, desc: "...")`\n'
+            f"   (es. `{materia}-c{cap}-p{pid}-01`, `{materia}-c{cap}-p{pid}-02`)."
+        )
+        dirs_to_add = (Path(pdf_path).parent, Path(txt_path).parent, Path(manifest["typst_project_dir"]))
+
+    prompt = (
+        f"Genera il file Typst per la parte {pid} del capitolo {cap} di {manifest['materia_name']}.\n\n"
+        f"{source_block}\n"
+        f"OUTPUT OBBLIGATORIO: scrivi il file `{part_out}`.\n"
+        f"REGOLE DI STRUTTURA:\n"
+        f'1. Prima riga del file: `#import "../../fig-helpers.typ": fig-safe, img-flag`\n'
+        f"2. NON inserire `#set page`, `#set text`, `#import \"@preview/cetz:...\"` o `#let nota`.\n"
+        f"3. {heading_rule}\n"
+        f"{flag_rule}\n"
+        f"5. Per testo + figura affiancati usa `#grid(columns: (1fr, 1fr), column-gutter: 1em, [...], [#img-flag(...)])` (MAI `auto`).\n"
+        f"6. Mai usare `#image(...)` diretti: segnala ogni figura tramite `#img-flag(...)`.\n\n"
+        f"--- SPECIFICA STILE E BUDGET ---\n{appunti_prompt}"
+    )
+
+    add_dirs: list[str] = []
+    for d in dirs_to_add:
+        ds = str(d)
+        if ds not in add_dirs:
+            add_dirs.append(ds)
+
+    cmd = [
+        general["agy_bin"],
+        "--model",
+        general["model_notes"],
+        "--disable-slash-commands",
+    ]
+    for ds in add_dirs:
+        cmd.extend(["--add-dir", ds])
+    cmd.extend(["--dangerously-skip-permissions", "-p", prompt])
+    res = subprocess.run(cmd, text=True)
+    if res.returncode != 0 or not part_out.exists() or part_out.stat().st_size == 0:
+        raise RuntimeError(f"Generazione appunti fallita per parte {pid} ({part_out})")
+
+
+def run_visual_check(
+    general: dict[str, Any],
+    manifest: dict[str, Any],
+    fig_report: dict[str, Any],
+) -> list[str]:
+    new_figs = fig_report.get("succeeded", []) + [
+        x["id"] for x in fig_report.get("fallback_png", [])
+    ]
+    if not new_figs:
+        print("\n==> [Controllo visivo --check] Nessuna figura nuova da verificare.", flush=True)
+        return []
+
+    typst_dir = Path(manifest["typst_project_dir"])
+    slug = manifest["chapter_slug"]
+    cap_file = typst_dir / f"{slug}.typ"
+    work_dir = Path(general["work_dir"]).expanduser()
+    check_dir = work_dir / f"check_{manifest['materia']}_cap{manifest['capitolo']}"
+    check_dir.mkdir(parents=True, exist_ok=True)
+
+    check_typ = check_dir / "check_cap.typ"
+    check_pdf = check_dir / "check_cap.pdf"
+    check_typ.write_text(
+        '#import "@preview/cetz:0.3.4": canvas, draw\n'
+        '#set page(paper: "a4", margin: 1.5cm, numbering: "1")\n'
+        '#set text(lang: "it", size: 11pt)\n'
+        '#let nota(body) = block(width: 100%, fill: luma(240), inset: 8pt, radius: 3pt, body)\n'
+        '#let circ = sym.degree\n'
+        '#let varphi = $phi$\n'
+        f'#include "{cap_file}"\n',
+        encoding="utf-8",
+    )
+    res = subprocess.run(
+        [general["typst_bin"], "compile", "--root", "/", str(check_typ), str(check_pdf)],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        print(f"Avviso --check: compilazione capitolo fallita ({res.stderr[:200]})", flush=True)
+        return []
+
+    subprocess.run(
+        [general["pdftoppm_bin"], "-png", "-r", "140", str(check_pdf), str(check_dir / "page")],
+        capture_output=True,
+        text=True,
+    )
+    pages = sorted(check_dir.glob("page-*.png"))
+    if not pages:
+        return []
+
+    figs_dir = typst_dir / manifest["figs_dir"]
+    emit_progress(phase="check", status="plan", done=0, total=2)
+    for rnd in range(1, 3):
+        t0 = time.monotonic()
+        emit_progress(phase="check", status="item_start", done=rnd - 1, total=2, item=f"Giro {rnd}/2 ({len(pages)} pagine)")
+        print(f"\n==> [Controllo visivo --check] Giro {rnd}/2 su {len(pages)} pagine...", flush=True)
+        page_list = "\n".join(f"- {p}" for p in pages)
+        prompt = (
+            f"Controlla visivamente con read_file queste pagine PNG del capitolo {slug}:\n{page_list}\n\n"
+            f"Figure nuove generate in `{figs_dir}`: {new_figs}.\n"
+            "Verifica se ci sono overflow fuori margine, testi sovrapposti alle linee o figure tagliate.\n"
+            "Se è tutto pulito, rispondi esattamente `OK`.\n"
+            f"Se trovi problemi in una figura CeTZ in `{figs_dir}/<id>.typ`, correggi quel file `<id>.typ` e rispondi `FIXED: <id>`."
+        )
+        chk = subprocess.run(
+            [
+                general["agy_bin"],
+                "--model",
+                general["model_figures"],
+                "--disable-slash-commands",
+                "--add-dir",
+                str(check_dir),
+                "--add-dir",
+                str(figs_dir),
+                "--dangerously-skip-permissions",
+                "-p",
+                prompt,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        out = chk.stdout.strip()
+        emit_progress(
+            phase="check",
+            status="item_done",
+            done=rnd,
+            total=2,
+            item=f"Giro {rnd}/2",
+            duration=round(time.monotonic() - t0, 2),
+        )
+        if out.startswith("OK") or "FIXED:" not in out:
+            break
+        subprocess.run(
+            [general["typst_bin"], "compile", "--root", "/", str(check_typ), str(check_pdf)],
+            capture_output=True,
+            text=True,
+        )
+        for old in check_dir.glob("page-*.png"):
+            old.unlink()
+        subprocess.run(
+            [general["pdftoppm_bin"], "-png", "-r", "140", str(check_pdf), str(check_dir / "page")],
+            capture_output=True,
+            text=True,
+        )
+        pages = sorted(check_dir.glob("page-*.png"))
+
+    emit_progress(phase="check", status="done", done=2, total=2)
+    return [str(p) for p in pages]
+
+
+def parse_part_filters(raw_parts: list[str] | None) -> list[str] | None:
+    if not raw_parts:
+        return None
+    out: list[str] = []
+    for item in raw_parts:
+        for tok in item.split(","):
+            t = tok.strip().lower()
+            if t and t not in out:
+                out.append(t)
+    return out or None
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "cetz":
+        return subprocess.run(
+            [sys.executable, str(CORE_DIR / "studio_gui.py"), "--tab", "cetz", *argv[1:]]
+        ).returncode
+
+    merge_only = False
+    if argv and argv[0] == "merge":
+        merge_only = True
+        argv = argv[1:]
+
+    parser = argparse.ArgumentParser(
+        prog="appunti",
+        description="Appunti Typst Studio — genera/unisce capitoli Typst + CeTZ in copia locale.",
+    )
+    parser.add_argument("materia", nargs="?", help="Nome materia in config.toml (es. ecm, chimica)")
+    parser.add_argument("capitolo", nargs="?", type=int, help="Numero capitolo (es. 12)")
+    parser.add_argument("--config", type=Path, default=None, help="Percorso alternativo a config.toml")
+    parser.add_argument("--gui", action="store_true", help="Apri l'interfaccia grafica")
+    parser.add_argument("--no-gui", action="store_true", help="Esegui solo da terminale senza aprire la GUI")
+    parser.add_argument("--part", action="append", default=None, help="Elabora solo parti specifiche (es. --part 1,3)")
+    parser.add_argument("--check", action="store_true", default=True, help="Controllo visivo PNG (default attivo)")
+    parser.add_argument("--no-check", action="store_false", dest="check", help="Salta il controllo visivo PNG")
+    parser.add_argument("--mineru", action="store_true", default=None, help="Usa MinerU OCR + ritaglio figure (default)")
+    parser.add_argument("--no-mineru", action="store_false", dest="mineru", help="Usa PDF crudo + pdftoppm")
+    parser.add_argument("--force-ocr", action="store_true", help="Forza OCR MinerU completo (--ocr-mode ocr)")
+    parser.add_argument("--transcribe", action="store_true", help="Avvia trascrizione audio/video senza chiedere")
+    parser.add_argument("--force-figures", action="store_true", help="Rigenera anche figure esistenti")
+    parser.add_argument("--skip-notes", action="store_true", help="Salta generazione testo e rigenera solo figure")
+    parser.add_argument("--merge", action="store_true", help="Unisce le parti in un unico <capitolo>.typ alla fine")
+    args = parser.parse_args(argv)
+    requested_parts = parse_part_filters(args.part)
+
+    cfg_path, cfg = load_config(args.config)
+    general = cfg["general"]
+    use_mineru = bool(general.get("use_mineru_default", True)) if args.mineru is None else bool(args.mineru)
+
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not merge_only and not args.no_gui and (args.gui or has_display or args.materia is None or args.capitolo is None):
+        gui_cmd = [sys.executable, str(CORE_DIR / "studio_gui.py")]
+        if args.config:
+            gui_cmd.extend(["--config", str(cfg_path)])
+        if args.materia:
+            gui_cmd.extend(["--materia", args.materia.lower()])
+        if args.capitolo is not None:
+            gui_cmd.extend(["--cap", str(args.capitolo), "--auto-run"])
+        if not args.check:
+            gui_cmd.append("--no-check")
+        if not use_mineru:
+            gui_cmd.append("--no-mineru")
+        if args.force_ocr:
+            gui_cmd.append("--force-ocr")
+        if args.transcribe:
+            gui_cmd.append("--transcribe")
+        if args.force_figures:
+            gui_cmd.append("--force-figures")
+        if args.skip_notes:
+            gui_cmd.append("--skip-notes")
+        if args.merge:
+            gui_cmd.append("--merge")
+        if requested_parts:
+            gui_cmd.append(f"--part={','.join(requested_parts)}")
+        return subprocess.run(gui_cmd).returncode
+
+    work_dir = Path(general["work_dir"]).expanduser()
+    materia = args.materia.lower()
+    manifest_path = work_dir / f"{materia}_cap{args.capitolo}_manifest.json"
+    cfg_arg = ["--config", str(cfg_path)]
+
+    if merge_only:
+        emit_progress(phase="merge", status="start")
+        if not manifest_path.exists():
+            run_step(
+                [sys.executable, str(CORE_DIR / "discover.py"), materia, str(args.capitolo), *cfg_arg, "--out", str(manifest_path)],
+                "Discovery",
+            )
+        run_step([sys.executable, str(CORE_DIR / "merge_chapter.py"), str(manifest_path), *cfg_arg], "Merge parti")
+        emit_progress(phase="merge", status="done")
+        return 0
+
+    emit_progress(phase="discovery", status="start", item="Analisi cartella capitolo")
+    run_step(
+        [sys.executable, str(CORE_DIR / "discover.py"), materia, str(args.capitolo), *cfg_arg, "--out", str(manifest_path)],
+        "1/5 Discovery",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    emit_progress(phase="discovery", status="done")
+
+    pdf_parts = [p for p in manifest["parts"] if p.get("pdf")]
+    if requested_parts:
+        req_set = set(requested_parts)
+        selected_parts = [p for p in pdf_parts if p["part_id"].lower() in req_set]
+        found_ids = {p["part_id"].lower() for p in selected_parts}
+        not_found = [pid for pid in requested_parts if pid not in found_ids]
+        if not_found:
+            print(f"Errore: parti {not_found} non trovate nel capitolo {args.capitolo}.", file=sys.stderr, flush=True)
+            return 2
+    else:
+        selected_parts = pdf_parts
+
+    selected_ids = {p["part_id"].lower() for p in selected_parts}
+
+    need_tx = [
+        pid for pid in manifest["missing"]["parts_needing_transcription"] if pid.lower() in selected_ids
+    ]
+    if need_tx:
+        do_transcribe = args.transcribe
+        if not do_transcribe and sys.stdin.isatty():
+            ans = input(
+                f"\nLe parti {need_tx} hanno video/audio ma nessun .txt.\n"
+                "Vuoi trascrivere con Gemini API [s] oppure fermarti per fornire i .txt a mano [N]? "
+            ).strip().lower()
+            do_transcribe = ans in ("s", "si", "sì", "y", "yes")
+        if not do_transcribe:
+            print(
+                f"\nSTOP: Le parti {need_tx} non hanno .txt.\n"
+                f"Aggiungi i .txt in {manifest['chapter_dir']} oppure usa --transcribe.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 3
+        tx_cmd = [sys.executable, str(CORE_DIR / "transcribe.py"), str(manifest_path), *cfg_arg]
+        if requested_parts:
+            tx_cmd.extend(["--parts", ",".join(requested_parts)])
+        run_step(tx_cmd, "2/5 Trascrizione Gemini API")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        pdf_parts = [p for p in manifest["parts"] if p.get("pdf")]
+        selected_parts = [p for p in pdf_parts if p["part_id"].lower() in selected_ids]
+    else:
+        emit_progress(phase="transcribe", status="skip")
+
+    still_missing_txt = [
+        pid for pid in manifest["missing"]["parts_without_txt"] if pid.lower() in selected_ids
+    ]
+    if still_missing_txt and not args.skip_notes:
+        print(
+            f"\nSTOP OBBLIGATORIO: le parti selezionate {still_missing_txt} non hanno .txt.\n"
+            f"Aggiungi i .txt (o media) in `{manifest['chapter_dir']}` e rilancia.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 3
+
+    mineru_cache_dir: Path | None = None
+    if use_mineru:
+        mineru_cmd = [sys.executable, str(CORE_DIR / "parse_mineru.py"), str(manifest_path), *cfg_arg]
+        if requested_parts:
+            mineru_cmd.extend(["--parts", ",".join(requested_parts)])
+        if args.force_ocr:
+            mineru_cmd.append("--force-ocr")
+        else:
+            flagged = [
+                f"Parte {p['part_id']} ({p['ocr_info']['reason']})"
+                for p in selected_parts
+                if (p.get("ocr_info") or {}).get("level") in ("recommended", "required")
+            ]
+            if flagged:
+                print(
+                    f"Avviso OCR: {'; '.join(flagged)} — se vedi simboli/formule rotti rilancia con --force-ocr.",
+                    flush=True,
+                )
+        run_step(mineru_cmd, "2b/5 Parsing MinerU OCR")
+        mineru_cache_dir = work_dir / "mineru_cache" / f"{materia}_cap{args.capitolo}"
+    else:
+        emit_progress(phase="mineru", status="skip")
+
+    typst_dir = ensure_local_project(manifest)
+    slug = manifest["chapter_slug"]
+    parts_dir = typst_dir / "_parts" / slug
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    cap_file = typst_dir / f"{slug}.typ"
+
+    if args.skip_notes:
+        emit_progress(phase="notes", status="skip")
+    else:
+        emit_progress(phase="notes", status="plan", done=0, total=len(selected_parts))
+        for done_i, part in enumerate(selected_parts):
+            idx = pdf_parts.index(part)
+            part_out = parts_dir / f"p{part['part_id']}.typ"
+            pdf_name = Path(part["pdf"]).name if part.get("pdf") else ""
+            src_tag = "OCR MinerU" if use_mineru else "PDF crudo"
+            item_label = f"Parte {part['part_id']} ({src_tag})" + (f" · {pdf_name}" if pdf_name else "")
+            t0 = time.monotonic()
+            emit_progress(phase="notes", status="item_start", done=done_i, total=len(selected_parts), item=item_label)
+            print(f"\n==> [3/5 Appunti parte {part['part_id']} · {src_tag}] -> {part_out}", flush=True)
+            mineru_part_dir = (mineru_cache_dir / f"p{part['part_id']}") if mineru_cache_dir else None
+            generate_part_notes(general, manifest, part, part_out, is_first=(idx == 0), mineru_part_dir=mineru_part_dir)
+            sync_chapter_live(typst_dir, manifest, pdf_parts)
+            dt = round(time.monotonic() - t0, 2)
+            print(f"  ✓ Parte {part['part_id']} generata in {dt:.1f}s (visibile live in LocalTypst)", flush=True)
+            emit_progress(phase="notes", status="item_done", done=done_i + 1, total=len(selected_parts), item=item_label, duration=dt)
+        emit_progress(phase="notes", status="done", done=len(selected_parts), total=len(selected_parts))
+
+    existing_part_files = sync_chapter_live(typst_dir, manifest, pdf_parts)
+    if not existing_part_files:
+        print("Errore: nessun file parte .typ presente da elaborare.", file=sys.stderr, flush=True)
+        return 2
+
+    selected_part_files = [
+        parts_dir / f"p{p['part_id']}.typ"
+        for p in selected_parts
+        if (parts_dir / f"p{p['part_id']}.typ").exists()
+    ]
+    fig_cmd = [sys.executable, str(CORE_DIR / "figures.py"), str(manifest_path), *[str(p) for p in selected_part_files], *cfg_arg]
+    if args.force_figures:
+        fig_cmd.append("--force")
+    if mineru_cache_dir is not None and mineru_cache_dir.exists():
+        fig_cmd.extend(["--mineru-dir", str(mineru_cache_dir)])
+    run_step(fig_cmd, "4/5 Figure CeTZ")
+
+    fig_rep_path = work_dir / f"{materia}_cap{args.capitolo}_figures_report.json"
+    fig_report = json.loads(fig_rep_path.read_text(encoding="utf-8")) if fig_rep_path.exists() else {}
+
+    emit_progress(phase="insert", status="start", item="Compilazione e inserimento in main.typ")
+    ins_res = subprocess.run(
+        [sys.executable, str(CORE_DIR / "insert_chapter.py"), str(manifest_path), *cfg_arg],
+        capture_output=True,
+        text=True,
+    )
+    print("\n==> [5/5 Inserimento in main.typ]", flush=True)
+    print(ins_res.stdout.strip(), flush=True)
+    if ins_res.returncode != 0:
+        print(ins_res.stderr.strip(), file=sys.stderr, flush=True)
+        return ins_res.returncode
+    emit_progress(phase="insert", status="done")
+
+    undo_cmd = ""
+    for line in ins_res.stdout.splitlines():
+        if line.startswith("Comando per annullare:"):
+            undo_cmd = line.split(":", 1)[1].strip()
+
+    checked_pages: list[str] = []
+    if args.check:
+        checked_pages = run_visual_check(general, manifest, fig_report)
+    else:
+        emit_progress(phase="check", status="skip")
+
+    if args.merge:
+        emit_progress(phase="merge", status="start")
+        run_step([sys.executable, str(CORE_DIR / "merge_chapter.py"), str(manifest_path), *cfg_arg], "Merge parti")
+        emit_progress(phase="merge", status="done")
+
+    print("\n" + "=" * 60, flush=True)
+    print(f"REPORT FINALE — {manifest['materia_name']} | {slug}.typ ({manifest['chapter_title']})", flush=True)
+    print("=" * 60, flush=True)
+    print(f"- Progetto locale: {typst_dir}", flush=True)
+    print(f"- File capitolo: {cap_file}", flush=True)
+    print(f"- Parti elaborate: {len(selected_parts)}/{len(pdf_parts)} ({[p['part_id'] for p in selected_parts]})", flush=True)
+    print(f"- Figure riuscite: {len(fig_report.get('succeeded', []))} {fig_report.get('succeeded', [])}", flush=True)
+    print(f"- Figure fallback: {[x['id'] for x in fig_report.get('fallback_png', [])]}", flush=True)
+    print(f"- Errori figure: {fig_report.get('errors', [])}", flush=True)
+    if checked_pages:
+        print(f"- Pagine controllate (--check): {len(checked_pages)}", flush=True)
+    if not args.merge:
+        print(f"- Per unire le parti dopo il controllo: appunti merge {materia} {args.capitolo}", flush=True)
+    if undo_cmd:
+        print(f"- Comando esatto per annullare: {undo_cmd}", flush=True)
+    print("=" * 60, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

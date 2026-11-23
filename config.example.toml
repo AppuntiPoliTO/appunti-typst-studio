@@ -1,0 +1,81 @@
+# Configurazione di esempio — Appunti Typst Studio
+# Copia questo file in `config.toml` (o `~/.config/appunti-typst-studio/config.toml`)
+# e adatta i percorsi alle tue cartelle.
+
+[general]
+# Directory di lavoro per manifest, report e cache MinerU (default: <repo>/work)
+work_dir = "~/Documents/Appunti/work"
+# Directory backup anteprime CeTZ Studio
+cetz_backup_dir = "~/Documents/CeTZ_Backup"
+# Cartella screenshot predefinita per CeTZ Studio / shortcut screenshot
+screenshots_dir = "~/Screenshots"
+
+# Eseguibili (lascia vuoto per rilevamento automatico dal PATH / .venv-mineru)
+agy_bin = ""
+typst_bin = ""
+ffmpeg_bin = ""
+pdftoppm_bin = ""
+git_bin = ""
+mineru_bin = ""
+
+# Backend MinerU 4.x ONNX
+mineru_tier = "basic"
+use_mineru_default = true
+
+# Modelli Gemini (via agy CLI + Gemini API per trascrizione audio)
+model_notes = "gemini-4-hydrogen-medium"
+model_figures = "gemini-4-hydrogen-medium"
+model_cetz_studio = "gemini-4-hydrogen-high"
+model_cetz_screenshot = "gemini-4-hydrogen-medium"
+model_transcribe = "gemini-4-hydrogen-medium"
+gemini_transcribe_model = "gemini-3.5-transcribe"
+gemini_api_key_file = "~/.config/appunti/gemini.key"
+
+# Parametri grafici e trascrizione
+default_max_fig_height = "6cm"
+audio_chunk_seconds = 600
+audio_overlap_seconds = 8
+figure_max_retries = 2
+figure_batch_size = 5
+
+# ==============================================================================
+# MATERIE CONFIGURATE (aggiungi o modifica le tue materie)
+# ==============================================================================
+
+[materie.ecm]
+name = "Elementi di Costruzione di Macchine"
+source_dir = "~/Desktop/ECM"
+chapter_layout = "subfolders"   # cartelle <NN> - <Titolo>
+chapter_dir_pattern = '^(\d{1,2})\s*-\s*(.+)$'
+
+# Cartella sorgente condivisa (SOLA LETTURA: la pipeline copia in typst_project_dir)
+shared_source_dir = ""
+# Progetto locale visibile direttamente in LocalTypst (fuori da Ambienti/ condivisi)
+typst_project_dir = "~/Documents/LocalTypst/projects/Appunti_ECM_Locale"
+main_file = "main.typ"
+chapters_dir = "."
+figs_dir = "figs"
+max_fig_height = "6cm"
+
+pdf_pattern = '(?i)^ecm\s*(\d+)-(\d+[a-z]?)(?:\s+(.*))?\.pdf$'
+txt_pattern = '(?i)^ecm\s*(\d+)[-_](\d+[a-z]?)(?:\s*\(.*\))?\.txt$'
+media_pattern = '(?i)^ecm\s*(\d+)_(\d+[a-z]?)(?:\s*.*)?\.(mp4|mkv|webm|mov|avi|mp3|wav|m4a|ogg)$'
+extra_media_dirs = ["~/Desktop/ECM/video ecm"]
+
+[materie.chimica]
+name = "Chimica"
+source_dir = "~/Desktop/Chimica"
+chapter_layout = "flat_files"   # file modulo<N> direttamente nella cartella
+chapter_dir_pattern = ''
+
+shared_source_dir = ""
+typst_project_dir = "~/Documents/LocalTypst/projects/Appunti_Chimica_Locale"
+main_file = "main.typ"
+chapters_dir = "."
+figs_dir = "figs"
+max_fig_height = "6cm"
+
+pdf_pattern = '(?i)^modulo\s*(\d+)(?:[_\s]+(.*))?\.pdf$'
+txt_pattern = '(?i)^modulo\s*(\d+)(?:[_\s]+(.*))?\.txt$'
+media_pattern = '(?i)^modulo\s*(\d+)(?:[_\s]+.*)?\.(mp4|mkv|webm|mov|avi|mp3|wav|m4a|ogg)$'
+extra_media_dirs = []

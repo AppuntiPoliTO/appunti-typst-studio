@@ -1,0 +1,19 @@
+# Configurazione personale e segreti (usa config.example.toml come template)
+config.toml
+*.key
+.env
+
+# Ambienti virtuali e cache Python
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+
+# Cache di lavoro, manifest, backup e log temporanei
+work/
+progetti/
+_backup_appunti/
+*.bak
+*.log
+*.tmp
+.DS_Store

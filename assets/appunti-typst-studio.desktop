@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Appunti Typst Studio
+Comment=Pipeline Appunti Typst + MinerU OCR + CeTZ Studio
+Exec=appunti-gui
+Icon=appunti-typst-studio
+Terminal=false
+Type=Application
+Categories=Education;Office;Graphics;
+StartupWMClass=local.appunti.typst.studio
+Keywords=typst;cetz;appunti;ocr;mineru;pdf;

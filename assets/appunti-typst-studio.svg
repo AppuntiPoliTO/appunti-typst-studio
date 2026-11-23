@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a5fb4"/>
+      <stop offset="55%" stop-color="#1c71d8"/>
+      <stop offset="100%" stop-color="#2ec27e"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#eef5ff" stop-opacity="0.96"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3584e4"/>
+      <stop offset="100%" stop-color="#26a269"/>
+    </linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0a2540" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- Rounded GNOME squircle background -->
+  <rect x="8" y="8" width="112" height="112" rx="28" ry="28" fill="url(#bg)"/>
+
+  <!-- Subtle engineering grid overlay -->
+  <g stroke="#ffffff" stroke-opacity="0.10" stroke-width="1">
+    <line x1="32" y1="16" x2="32" y2="112"/>
+    <line x1="56" y1="16" x2="56" y2="112"/>
+    <line x1="80" y1="16" x2="80" y2="112"/>
+    <line x1="104" y1="16" x2="104" y2="112"/>
+    <line x1="16" y1="32" x2="112" y2="32"/>
+    <line x1="16" y1="56" x2="112" y2="56"/>
+    <line x1="16" y1="80" x2="112" y2="80"/>
+    <line x1="16" y1="104" x2="112" y2="104"/>
+  </g>
+
+  <!-- Document card (Typst notes) -->
+  <g filter="url(#shadow)">
+    <path d="M 28 24 H 74 L 94 44 V 100 A 8 8 0 0 1 86 108 H 28 A 8 8 0 0 1 20 100 V 32 A 8 8 0 0 1 28 24 Z" fill="url(#card)"/>
+    <!-- Folded corner -->
+    <path d="M 74 24 V 40 A 4 4 0 0 0 78 44 H 94 Z" fill="#cde0fa"/>
+  </g>
+
+  <!-- Clean Typst text lines at top of card -->
+  <rect x="30" y="36" width="28" height="5" rx="2.5" fill="#1a5fb4"/>
+  <rect x="30" y="46" width="44" height="3.2" rx="1.6" fill="#6384b0" opacity="0.65"/>
+  <rect x="30" y="53" width="36" height="3.2" rx="1.6" fill="#6384b0" opacity="0.45"/>
+
+  <!-- Embedded CeTZ vector diagram on document -->
+  <g transform="translate(30, 62)">
+    <!-- Axes -->
+    <line x1="4" y1="34" x2="52" y2="34" stroke="#1a5fb4" stroke-width="2" stroke-linecap="round"/>
+    <line x1="4" y1="34" x2="4" y2="4" stroke="#1a5fb4" stroke-width="2" stroke-linecap="round"/>
+    <!-- Axis arrow tips -->
+    <polygon points="54,34 48,31 48,37" fill="#1a5fb4"/>
+    <polygon points="4,2 1,8 7,8" fill="#1a5fb4"/>
+    <!-- Shaded area under curve -->
+    <path d="M 8 31 Q 22 6 35 20 T 50 10 L 50 34 L 8 34 Z" fill="url(#accent)" opacity="0.22"/>
+    <!-- Smooth Bezier curve (CeTZ) -->
+    <path d="M 8 31 Q 22 6 35 20 T 50 10" fill="none" stroke="url(#accent)" stroke-width="3" stroke-linecap="round"/>
+    <!-- Control points / nodes -->
+    <circle cx="22" cy="15" r="3.2" fill="#ffffff" stroke="#1c71d8" stroke-width="2"/>
+    <circle cx="46" cy="13" r="3.2" fill="#ffffff" stroke="#26a269" stroke-width="2"/>
+  </g>
+
+  <!-- Floating AI / CeTZ badge in bottom-right -->
+  <g filter="url(#shadow)" transform="translate(88, 86)">
+    <circle cx="14" cy="14" r="18" fill="#1e2430"/>
+    <circle cx="14" cy="14" r="15.5" fill="none" stroke="#57e389" stroke-width="1.8" stroke-opacity="0.85"/>
+    <!-- 4-point spark star -->
+    <path d="M 14 3 C 14.8 10 18 13.2 25 14 C 18 14.8 14.8 18 14 25 C 13.2 18 10 14.8 3 14 C 10 13.2 13.2 10 14 3 Z" fill="#f8e45c"/>
+  </g>
+</svg>

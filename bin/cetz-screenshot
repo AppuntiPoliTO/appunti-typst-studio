@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Shortcut rapido: converte l'ultimo screenshot o immagine negli appunti in CeTZ.
+
+Miglioramenti rispetto al vecchio cetz-from-screenshot.py:
+- Usa AgyStreamSession (elimina il bug di `agy -c` che collideva con altre sessioni)
+- Lock file atomico reale via fcntl (niente `if False:` rotto)
+- Anteprima rapida Libadwaita/GTK4 moderna con codice modificabile, Rerun, Modifica AI e Copia
+"""
+
+from __future__ import annotations
+
+import fcntl
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from core.agy_client import AgyStreamSession
+from core.cetz_engine import convert_single_image, refine_cetz_code, render_cetz_png
+from core.paths import load_config
+
+
+def notify(summary: str, body: str = "", replace_id: int = 0, print_id: bool = False, transient: bool = False) -> int:
+    if not shutil.which("notify-send"):
+        return 0
+    cmd = ["notify-send", "-a", "Appunti Typst Studio"]
+    if transient:
+        cmd.append("-e")
+    if replace_id:
+        cmd.extend(["-r", str(replace_id)])
+    if print_id:
+        cmd.append("-p")
+    cmd.extend([summary, body])
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+    return int(out) if out.isdigit() else replace_id
+
+
+def acquire_image(screenshots_dir: Path, tmp_img: Path) -> Path | None:
+    if shutil.which("wl-paste"):
+        types = subprocess.run(["wl-paste", "--list-types"], capture_output=True, text=True)
+        if types.returncode == 0 and "image/png" in types.stdout:
+            raw = subprocess.run(["wl-paste", "--type", "image/png"], capture_output=True)
+            if raw.returncode == 0 and raw.stdout:
+                tmp_img.write_bytes(raw.stdout)
+                return tmp_img
+    if screenshots_dir.exists():
+        imgs = [p for p in screenshots_dir.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
+        if imgs:
+            return max(imgs, key=lambda p: p.stat().st_mtime)
+    return None
+
+
+def copy_text(text: str) -> None:
+    if shutil.which("wl-copy"):
+        subprocess.run(["wl-copy"], input=text, text=True)
+    elif shutil.which("xclip"):
+        subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True)
+
+
+def open_preview_window(
+    *,
+    code: str,
+    png_path: Path,
+    orig_path: Path,
+    agy_bin: str,
+    typst_bin: str,
+    model: str,
+    backup_dir: Path,
+    stem: str,
+) -> None:
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gdk, GLib, Gtk
+
+    state = {"code": code, "png": str(png_path)}
+
+    class QuickPreviewApp(Adw.Application):
+        def __init__(self) -> None:
+            super().__init__(application_id="local.appunti.cetz.quick")
+
+        def do_activate(self) -> None:
+            win = Adw.ApplicationWindow(application=self, title="Anteprima CeTZ", default_width=620, default_height=560)
+            tv_box = Adw.ToolbarView()
+            win.set_content(tv_box)
+
+            hdr = Adw.HeaderBar()
+            hdr.set_title_widget(Adw.WindowTitle(title="Anteprima CeTZ", subtitle=model))
+            btn_copy = Gtk.Button(label="Copia e chiudi")
+            btn_copy.add_css_class("suggested-action")
+            hdr.pack_end(btn_copy)
+            tv_box.add_top_bar(hdr)
+
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            body.set_margin_top(12)
+            body.set_margin_bottom(12)
+            body.set_margin_start(12)
+            body.set_margin_end(12)
+            tv_box.set_content(body)
+
+            pic = Gtk.Picture(can_shrink=True, vexpand=True)
+            pic.set_filename(state["png"])
+            body.append(pic)
+
+            code_tv = Gtk.TextView(editable=True, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+            code_buf = code_tv.get_buffer()
+            code_buf.set_text(state["code"])
+            code_sw = Gtk.ScrolledWindow(min_content_height=150, child=code_tv)
+            exp = Gtk.Expander(label="Codice CeTZ (modificabile)", child=code_sw)
+            body.append(exp)
+
+            st_lbl = Gtk.Label(label="Pronto — copiato negli appunti", xalign=0)
+            st_lbl.add_css_class("caption")
+            st_lbl.add_css_class("dim-label")
+            body.append(st_lbl)
+
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            ent = Gtk.Entry(placeholder_text="Chiedi modifica AI (es. sposta etichetta, aggiungi freccia)…", hexpand=True)
+            b_ai = Gtk.Button(label="Modifica AI")
+            b_ai.add_css_class("suggested-action")
+            b_rerun = Gtk.Button(label="Rerun")
+            bar.append(ent)
+            bar.append(b_ai)
+            bar.append(b_rerun)
+            body.append(bar)
+
+            def do_copy_close(*_: object) -> None:
+                cur = code_buf.get_text(code_buf.get_start_iter(), code_buf.get_end_iter(), True)
+                Gdk.Display.get_default().get_clipboard().set(cur)
+                copy_text(cur)
+                win.close()
+
+            def do_rerun(*_: object) -> None:
+                cur = code_buf.get_text(code_buf.get_start_iter(), code_buf.get_end_iter(), True).strip()
+                if not cur:
+                    return
+                ok, pp, err = render_cetz_png(typst_bin, cur, backup_dir, stem)
+                if ok:
+                    state["code"] = cur
+                    state["png"] = str(pp)
+                    pic.set_filename(str(pp))
+                    st_lbl.set_text("Compilato con successo")
+                else:
+                    st_lbl.set_text(f"Errore Typst: {err.splitlines()[0][:100]}")
+
+            def do_ai(*_: object) -> None:
+                q = ent.get_text().strip()
+                if not q:
+                    return
+                cur = code_buf.get_text(code_buf.get_start_iter(), code_buf.get_end_iter(), True).strip()
+                ent.set_text("")
+                b_ai.set_sensitive(False)
+                st_lbl.set_text("Modifica AI in corso…")
+
+                def worker() -> None:
+                    res = refine_cetz_code(
+                        agy_bin=agy_bin,
+                        typst_bin=typst_bin,
+                        model=model,
+                        current_code=cur,
+                        instruction=q,
+                        out_dir=backup_dir,
+                        stem=stem,
+                        img_path=orig_path,
+                    )
+
+                    def done() -> None:
+                        b_ai.set_sensitive(True)
+                        if res["ok"]:
+                            state["code"] = res["code"]
+                            state["png"] = res["png"]
+                            code_buf.set_text(res["code"])
+                            pic.set_filename(res["png"])
+                            st_lbl.set_text(f"Modificato in {res['duration']:.1f}s")
+                        else:
+                            st_lbl.set_text(f"{res['status']}: {res['err'][:100]}")
+
+                    GLib.idle_add(done)
+
+                threading.Thread(target=worker, daemon=True).start()
+
+            btn_copy.connect("clicked", do_copy_close)
+            b_rerun.connect("clicked", do_rerun)
+            b_ai.connect("clicked", do_ai)
+            ent.connect("activate", do_ai)
+            win.present()
+
+    QuickPreviewApp().run([])
+
+
+def main() -> int:
+    lock_file = open("/tmp/appunti_cetz_shot.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        notify("CeTZ già in esecuzione", "Attendi il completamento dello screenshot precedente.", transient=True)
+        return 0
+
+    _, cfg = load_config()
+    gen = cfg["general"]
+    backup_dir = Path(gen["cetz_backup_dir"])
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    screenshots_dir = Path(gen["screenshots_dir"])
+    prompt_file = Path(gen["prompts_dir"]) / "figure.md"
+    prompt_text = prompt_file.read_text(encoding="utf-8").strip()
+    model = gen["model_cetz_screenshot"]
+    stem = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+
+    with tempfile.TemporaryDirectory(prefix="cetz_shot_") as tmp:
+        img_path = acquire_image(screenshots_dir, Path(tmp) / "clipboard.png")
+        if not img_path:
+            notify("Nessuno screenshot trovato", "Copia un'immagine negli appunti o salva in ~/Screenshots.")
+            return 1
+
+        nid = notify("CeTZ in corso…", f"Analisi {img_path.name} ({model})", print_id=True, transient=True)
+        with AgyStreamSession(gen["agy_bin"], model, [img_path.parent, Path(tmp)]) as sess:
+            res = convert_single_image(
+                agy_bin=gen["agy_bin"],
+                typst_bin=gen["typst_bin"],
+                model=model,
+                prompt_text=prompt_text,
+                img_path=img_path,
+                out_dir=backup_dir,
+                stem=stem,
+                session=sess,
+                skip_non_study=False,
+                max_retries=int(gen.get("figure_max_retries", 2)),
+                status_cb=lambda s: notify("CeTZ in corso…", s, replace_id=nid, transient=True),
+            )
+
+        if not res["ok"]:
+            notify("Errore CeTZ", res.get("err", res["status"])[:140], replace_id=nid)
+            return 1
+
+        copy_text(res["code"])
+        act = ""
+        if shutil.which("notify-send"):
+            act = subprocess.run(
+                [
+                    "notify-send",
+                    "-u",
+                    "critical",
+                    "-a",
+                    "Appunti Typst Studio",
+                    "-r",
+                    str(nid),
+                    "-A",
+                    "open=Apri anteprima",
+                    "CeTZ pronto e copiato!",
+                    f"Generato in {res['duration']:.1f}s. Clicca per anteprima e modifiche AI.",
+                ],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        if act == "open":
+            open_preview_window(
+                code=res["code"],
+                png_path=Path(res["png"]),
+                orig_path=img_path,
+                agy_bin=gen["agy_bin"],
+                typst_bin=gen["typst_bin"],
+                model=model,
+                backup_dir=backup_dir,
+                stem=stem,
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

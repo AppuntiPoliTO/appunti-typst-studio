@@ -56,18 +56,18 @@ def ensure_local_project(manifest: dict[str, Any]) -> Path:
         else:
             typst_dir.mkdir(parents=True, exist_ok=True)
 
-    helpers_dst = typst_dir / "fig-helpers.typ"
+    figs_dir = typst_dir / manifest["figs_dir"]
+    figs_dir.mkdir(parents=True, exist_ok=True)
+    helpers_dst = figs_dir / "_helpers.typ"
     if not helpers_dst.exists():
         helpers_dst.write_text(
             (TEMPLATES_DIR / "fig-helpers.typ").read_text(encoding="utf-8"),
             encoding="utf-8",
         )
     macros_src = TEMPLATES_DIR / "cetz-macros.typ"
-    macros_dst = typst_dir / "cetz-macros.typ"
+    macros_dst = figs_dir / "_macros.typ"
     if macros_src.exists() and not macros_dst.exists():
         shutil.copy2(macros_src, macros_dst)
-    figs_dir = typst_dir / manifest["figs_dir"]
-    figs_dir.mkdir(parents=True, exist_ok=True)
     idx_dst = figs_dir / "_index.typ"
     if not idx_dst.exists():
         idx_dst.write_text(
@@ -218,7 +218,7 @@ def generate_part_notes(
         f"{source_block}\n"
         f"{output_rule}\n"
         f"REGOLE DI STRUTTURA:\n"
-        f'1. Prima riga del file: `#import "../../fig-helpers.typ": fig-safe, img-flag`\n'
+        f'1. Prima riga del file: `#import "../../figs/_helpers.typ": fig-safe, img-flag`\n'
         f"2. NON inserire `#set page`, `#set text`, `#import \"@preview/cetz:...\"` o `#let nota`.\n"
         f"3. {heading_rule}\n"
         f"{flag_rule}\n"

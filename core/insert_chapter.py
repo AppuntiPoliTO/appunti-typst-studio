@@ -41,15 +41,15 @@ def ensure_local_copy(typst_dir: Path, shared_dir_str: str) -> None:
 
 
 def ensure_helpers(typst_dir: Path, templates_dir: Path, figs_dir_name: str) -> None:
-    helpers_dst = typst_dir / "fig-helpers.typ"
+    figs_dir = typst_dir / figs_dir_name
+    figs_dir.mkdir(parents=True, exist_ok=True)
+    helpers_dst = figs_dir / "_helpers.typ"
     if not helpers_dst.exists():
         shutil.copy2(templates_dir / "fig-helpers.typ", helpers_dst)
     macros_src = templates_dir / "cetz-macros.typ"
-    macros_dst = typst_dir / "cetz-macros.typ"
+    macros_dst = figs_dir / "_macros.typ"
     if macros_src.exists() and not macros_dst.exists():
         shutil.copy2(macros_src, macros_dst)
-    figs_dir = typst_dir / figs_dir_name
-    figs_dir.mkdir(parents=True, exist_ok=True)
     idx_dst = figs_dir / "_index.typ"
     if not idx_dst.exists():
         shutil.copy2(templates_dir / "figs_index.typ", idx_dst)

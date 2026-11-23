@@ -148,15 +148,18 @@ def extract_cetz_code(raw: str) -> str:
 
 
 def compile_wrapper(typst_bin: str, code: str, tmp_dir: Path) -> tuple[bool, str]:
-    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
-    if macros_src.exists() and not (tmp_dir / "cetz-macros.typ").exists():
-        shutil.copy2(macros_src, tmp_dir / "cetz-macros.typ")
     sub = tmp_dir / "figs"
     sub.mkdir(exist_ok=True)
+    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
+    if macros_src.exists():
+        if not (sub / "_macros.typ").exists():
+            shutil.copy2(macros_src, sub / "_macros.typ")
+        if not (tmp_dir / "cetz-macros.typ").exists():
+            shutil.copy2(macros_src, tmp_dir / "cetz-macros.typ")
     wrapper = sub / "wrapper.typ"
     pdf_out = sub / "wrapper.pdf"
     body = code
-    if "@preview/cetz:" not in body and "cetz-macros.typ" not in body:
+    if "@preview/cetz:" not in body and "_macros.typ" not in body and "cetz-macros.typ" not in body:
         body = '#import "@preview/cetz:0.3.4": canvas, draw\n' + body
     wrapper.write_text(
         "#set page(width: auto, height: auto, margin: 0.4cm)\n" + body,
@@ -307,8 +310,8 @@ def main() -> int:
     figs_dir = typst_dir / manifest["figs_dir"]
     figs_dir.mkdir(parents=True, exist_ok=True)
     macros_src = TEMPLATES_DIR / "cetz-macros.typ"
-    if macros_src.exists() and not (typst_dir / "cetz-macros.typ").exists():
-        shutil.copy2(macros_src, typst_dir / "cetz-macros.typ")
+    if macros_src.exists() and not (figs_dir / "_macros.typ").exists():
+        shutil.copy2(macros_src, figs_dir / "_macros.typ")
 
     part_pdfs = {
         p["part_id"].lower(): Path(p["pdf"])

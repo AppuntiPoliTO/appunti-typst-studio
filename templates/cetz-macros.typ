@@ -1,5 +1,5 @@
 // Macro CeTZ 0.3.4 condivise per Appunti Typst Studio
-// Importabile nelle figure generate con: #import "../cetz-macros.typ": *
+// Installato in figs/_macros.typ — importabile nelle figure con: #import "_macros.typ": *
 #import "@preview/cetz:0.3.4": canvas, draw
 
 // Assi cartesiani 2D puliti con frecce ed etichette

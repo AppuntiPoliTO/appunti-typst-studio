@@ -1,5 +1,5 @@
-// Helper per figure sicure e flag automatici (generato da Appunti pipeline)
-#import "figs/_index.typ": fig-registry
+// Helper per figure sicure e flag automatici (installato in figs/_helpers.typ)
+#import "_index.typ": fig-registry
 
 #let fig-safe(body, max-h: 6cm, caption: none) = layout(size => {
   let m = measure(body)
@@ -14,9 +14,9 @@
   if id in fig-registry {
     let entry = fig-registry.at(id)
     if entry.type == "typ" {
-      fig-safe(include ("figs/" + entry.path), max-h: max-h, caption: cap)
+      fig-safe(include (entry.path), max-h: max-h, caption: cap)
     } else if entry.type == "png" {
-      fig-safe(image("figs/" + entry.path), max-h: max-h, caption: cap)
+      fig-safe(image(entry.path), max-h: max-h, caption: cap)
     }
   } else {
     block(

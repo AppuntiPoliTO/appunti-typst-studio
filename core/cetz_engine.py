@@ -39,16 +39,18 @@ def render_cetz_png(
     ppi: int = 180,
 ) -> tuple[bool, Path, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
-    if macros_src.exists() and not (out_dir / "cetz-macros.typ").exists():
-        shutil.copy2(macros_src, out_dir / "cetz-macros.typ")
-    # Supporta anche #import "../cetz-macros.typ" quando il file risiede in figs/
     figs_sub = out_dir / "figs"
     figs_sub.mkdir(exist_ok=True)
+    macros_src = TEMPLATES_DIR / "cetz-macros.typ"
+    if macros_src.exists():
+        if not (figs_sub / "_macros.typ").exists():
+            shutil.copy2(macros_src, figs_sub / "_macros.typ")
+        if not (out_dir / "cetz-macros.typ").exists():
+            shutil.copy2(macros_src, out_dir / "cetz-macros.typ")
     tp = figs_sub / f"{stem}.typ"
     pp = out_dir / f"{stem}.png"
     header = '#set page(width: auto, height: auto, margin: 0.4cm)\n'
-    if "@preview/cetz:" not in code and "cetz-macros.typ" not in code:
+    if "@preview/cetz:" not in code and "_macros.typ" not in code and "cetz-macros.typ" not in code:
         header += '#import "@preview/cetz:0.3.4": canvas, draw\n'
     tp.write_text(header + code + "\n", encoding="utf-8")
     res = subprocess.run(

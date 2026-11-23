@@ -488,7 +488,7 @@ class CeTZStudioView(Gtk.Box):
         if not code:
             self.toast_cb("Nessun codice CeTZ da salvare")
             return
-        if "@preview/cetz:" not in code and "cetz-macros.typ" not in code:
+        if "@preview/cetz:" not in code and "_macros.typ" not in code and "cetz-macros.typ" not in code:
             code = '#import "@preview/cetz:0.3.4": canvas, draw\n' + code
         ok, pp, err = render_cetz_png(self.typst_bin, code, self.backup_dir, it["stem"])
         if not ok:

@@ -24,14 +24,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.paths import load_config
 
 INCLUDE_PART_RX = re.compile(r'^\s*#include\s+"(_parts/[^"]+)"\s*$')
-IMPORT_HELPER_RX = re.compile(r'^\s*#import\s+"(?:\.\./)*fig-helpers\.typ"\s*:.*$\n?', re.MULTILINE)
+IMPORT_HELPER_RX = re.compile(
+    r'^\s*#import\s+"(?:\.\./)*(?:figs/_helpers|fig-helpers)\.typ"\s*:.*$\n?',
+    re.MULTILINE,
+)
 H1_LINE_RX = re.compile(r"^\s*=\s+.*$\n?", re.MULTILINE)
 
 
 def _strip_chunk(text: str, strip_h1: bool) -> str:
     body = IMPORT_HELPER_RX.sub("", text).strip()
     if strip_h1:
-        # Rimuove solo il primo eventuale titolo di livello 1 (= ...) all'inizio del blocco
         lines = body.splitlines()
         if lines and re.match(r"^\s*=\s+[^=]", lines[0]):
             body = "\n".join(lines[1:]).lstrip()
@@ -40,8 +42,8 @@ def _strip_chunk(text: str, strip_h1: bool) -> str:
 
 def _ensure_fig_helper_import(text: str) -> str:
     if ("#img-flag" in text or "img-flag(" in text or "#fig-safe" in text or "fig-safe(" in text):
-        if "fig-helpers.typ" not in text:
-            return '#import "fig-helpers.typ": fig-safe, img-flag\n\n' + text
+        if "figs/_helpers.typ" not in text and "fig-helpers.typ" not in text:
+            return '#import "figs/_helpers.typ": fig-safe, img-flag\n\n' + text
     return text
 
 
